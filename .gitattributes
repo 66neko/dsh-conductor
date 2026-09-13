@@ -1,0 +1,41 @@
+# ---------------------------------------------------------------------------
+# Git 属性：让跨平台协作的差异噪声降到最低。
+#
+# 本项目的开发者很可能在 WSL / Linux / macOS / Windows 之间切换
+# （skill 同时支持 bash 与 pwsh 两种 dialect），所以统一换行符尤其重要。
+# ---------------------------------------------------------------------------
+
+# 默认：自动识别文本、仓库内统一存 LF。
+# Windows 检出时由 Git 按 core.autocrlf 决定，不写死在仓库里。
+* text=auto eol=lf
+
+# 明确声明为二进制，禁止任何换行符转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.zstd binary
+
+# Shell 与 Python 脚本必须保持 LF（CRLF 会让 shebang 失效）
+*.sh text eol=lf
+*.py text eol=lf
+*.mjs text eol=lf
+*.js text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# Windows 脚本保持 CRLF
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 文档
+*.md text eol=lf
+*.toml text eol=lf
+
+# 让 git log / diff 把 skill 的 SKILL.md 认成文档而不是纯文本
+SKILL.md text eol=lf
