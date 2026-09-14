@@ -1,120 +1,106 @@
-# 架构
+# 架构与协议
 
-## 三层职责
+## 数据流
 
+```text
+调用方
+  │ conductor run
+  ▼
+conductor ── JSON-RPC/stdio ──► DSH manager
+  │                              │ load selected skill
+  │                              ▼
+  │                         agent-specific controller
+  │                              │ tmux buffer/paste
+  │                              ▼
+  │                         Claude Code or Codex
+  │                              │ token receipt
+  │                              ▼
+  │                         DSH independent checks
+  │                              │ atomic verdict
+  ◄──────────────────────────────┘
 ```
-┌──────────────┐  JSON-RPC/stdio  ┌────────────────────┐   tmux + skill   ┌──────────────┐
-│ 调用方       │ ───────────────► │ DSH 运行时         │ ───────────────► │ 下级 agent   │
-│ (Python)     │                  │ 编排 + 独立验收    │                  │ Claude/Codex │
-│              │ ◄─────────────── │                    │ ◄─────────────── │              │
-└──────────────┘  result.json     └────────────────────┘  不通过则追加指令  └──────────────┘
-```
 
-| 层 | 做什么 | **不**做什么 |
+conductor 不解释 DSH 或 worker 的自然语言。它只管理进程、协议事实和持久化记录的结构。
+
+## 三种事实
+
+系统区分三种含义，不能互相替代：
+
+| 事实 | 证明什么 | 不证明什么 |
 |---|---|---|
-| `conductor/cli.py` | 参数解析、建状态目录、驱动 DSH、显示进度、读回结论 | 不解释模型输出，不判断工作质量 |
-| DSH（外部进程） | 委派、**独立验收**、不通过则返工、落盘结构化结论 | 不直接改产物 |
-| `skills/tmux-coding-agents` | 启动/驱动交互式 TUI：读屏、发按键、等待完成 | 不判断任务是否完成 |
-| 下级 agent | 实际干活 | —— |
+| worker receipt 存在且 token 匹配 | 本轮 worker 已交还控制权 | 产物正确 |
+| DSH `turn/end` 为 completed 且 session idle | 管理回合在协议层正常收敛 | verdict 合法或验收通过 |
+| 当前 run 的 verdict 合法且 accepted | DSH 声明独立检查通过，且 conductor 的结构约束成立 | 验收标准本身足够严格 |
 
-**为什么验收必须由 DSH 做而不是 conductor 做**：验收需要读文件、跑命令、做判断，
-这些正是 agent 的能力。conductor 若自己实现一套，等于重写一个 agent 且更弱。
+receipt 的 token、文件路径和 attempt 都由 conductor 在委派前生成。每轮使用不同路径，controller
+拒绝覆盖已有 receipt。verdict 所在 run 目录也是唯一的，因此不会读取到旧运行的结论。
 
-## 完成判定：三处事实，没有一处靠猜
+## Worker 交接
 
-整个流程里每个"结束了"都由可核实的事实决定：
+controller 将用户任务和一段交接协议一起粘贴到 TUI。协议要求 worker 的最后一个工具动作为：
 
-| 判定 | 依据 | 类型 |
+```text
+<agent-specific script> complete --receipt <path> --token <token> ...
+```
+
+`complete` 以临时文件加 `os.replace` 原子写 receipt。controller 轮询文件、解析 JSON、校验 token
+和状态。TUI 退出、receipt 非法或超时都返回失败，并保留 tmux 会话供诊断。
+
+这条协议没有把验收交给 worker。worker 仍可能误判自己的工作，DSH 后续必须从工作区重新取证。
+
+## 两个独立适配器
+
+`conductor/tmux.py` 只实现 tmux 机制。以下差异由各自适配器维护：
+
+| 行为 | Claude Code | Codex |
 |---|---|---|
-| DSH 这一轮结束了吗 | `turn/end` 事件的 `reason.kind` + `session.status == idle` | **协议事实** |
-| 下级 agent 干完了吗 | skill 的 `--wait-file`（文件存在）优先于 `settle` | **文件事实** / 启发式兜底 |
-| DSH 验收通过了吗 | `.dsh-orchestrator/result.json` 存在且 `status == "accepted"` | **文件事实** |
+| 启动参数 | `--dangerously-skip-permissions` | `--dangerously-bypass-approvals-and-sandbox --no-alt-screen` |
+| 菜单光标 | `❯` | `›` |
+| 菜单提示 | `Enter to confirm` 等 | `Press enter to continue` 等 |
+| 就绪信号 | 输入光标或 bypass 状态 | 输入光标或 YOLO 状态 |
 
-`conductor` **不解析 DSH 的自然语言回复**来判断成败——那只打印给人看。
-运行前会删掉旧的 `result.json`，所以它的存在必然代表本次运行产生了它。
+首次目录信任菜单可能在初始主界面出现之后才弹出。controller 因此在启动阶段和等待 receipt
+阶段都处理已知菜单；若提交任务的回车被菜单消费，菜单关闭后只重新提交一次。
 
-### 为什么要有这条原则
+Codex 对长文本使用 bracketed paste，界面可能先显示 `[Pasted Content N chars]`，再异步完成
+编辑器更新。若最初的 Enter 早于更新完成，controller 只在该明确的 pending-paste 标记仍存在时
+节流重发 Enter；它不会根据屏幕静止或自然语言猜测任务是否已提交。
 
-两个真实的坑：
+## 字面文本传输
 
-1. **DSH 会把长耗时的委派当后台任务跑。** 它用 `bash` 启动 `agent_task.py run` 后立刻
-   拿到 `started background job bash-1`，再轮询 `job_output`。如果调用方靠"stdout 有没有
-   新内容"判断进度，这段时间看起来就是卡死。
-2. **下级 agent 的自述不是证据。** 它说"已完成"，可能是真完成、可能只写了一半、
-   可能写错了地方。所以编排指令里写死：**必须自己 `ls`/`read`/实际跑校验。**
+自然语言不进入 shell 命令，也不使用 `tmux send-keys -l` 承载长文本。controller 将完整 prompt
+写入命名 tmux buffer，再通过 `paste-buffer` 送入 TUI，最后单独发送 Enter。这保留换行、引号、
+`$()` 和形似按键名的文本，也绕开命令行长度限制。
 
-## 日志来源：为什么不抓屏
+## DSH 完成条件
 
-一开始的实现用 `tmux capture-pane` 轮询下级屏幕，只能看到**可见的那几十行**。
-挖下去发现三层递进的原因：
+DSH SDK profile 的 stdout 是 newline-delimited JSON-RPC 2.0。client 同时观察：
 
-### 1. 全屏 TUI 运行在备用屏幕上
-
-```
-$ tmux display-message -p -t <session> '#{history_size} 行历史'
-2 行历史 / 30 行可见
+```text
+session.event(type=turn/end, reason.kind=...)
+session.status(status=idle)
 ```
 
-备用屏幕**没有滚动缓冲**，所以 `capture-pane -S -N` 永远取不到滚出去的内容。
-试过 `set-option alternate-screen off`，也只从 0 行变成 2 行——不解决问题。
+两条通知可能交换顺序，因此 client 保存两个状态并在每次更新后重新判断。进程提前退出、RPC
+超时或没有 turn end 都映射为错误，不能因 stdout 暂停或 DSH 最后一条消息看似完成而成功。
 
-### 2. 更本质：TUI 发送的是「屏幕差分」，不是文本流
+## Verdict 防线
 
-全屏 TUI 重绘而不是换行滚动，所以 tmux 根本没有内容可以存进滚动历史。
-**这不是配置问题，是机制问题。**
+DSH 写出的 verdict 还要经过 conductor 校验：
 
-### 3. `tmux pipe-pane` 也不可用
+- `schema_version`、`run_id` 和 `agent` 与当前请求一致；
+- `attempts` 在允许范围内；
+- accepted 引用的每轮 receipt 都存在、token 匹配，且最后一轮状态为
+  `ready_for_verification`；
+- accepted 至少包含一个 check，且所有 check 的 `passed` 都为 true；
+- artifact 必须是工作区内的相对路径，accepted 时文件必须真实存在；
+- accepted 不能带 remaining issues。
 
-它是给终端回放用的原始字节流。剥掉 ANSI 之后：
+这些是结构和身份约束。任务语义与验收充分性仍由 DSH 负责，因此调用方应提供具体、可执行的
+`--verify`。
 
-```
-Accessingworkspace:              ← 空格没了（TUI 用光标定位，文字黏在一起）
-✻✽✻✶*✢·✢*✶✻✽✻✶*✢·✢*✶           ← spinner 垃圾
-（同样的段落重复出现 3 次）        ← TUI 重绘/重排
-prfix o / setw sychronize-panes  ← 文字被截断缺字
-```
+## 状态与恢复
 
-### 正确解法：跟随 agent 自己写的转录
-
-两个 agent 都会把完整会话写到磁盘：
-
-| agent | 转录路径 |
-|---|---|
-| Claude Code | `~/.claude/projects/<工作目录把 / 换成 ->/<session-id>.jsonl` |
-| Codex | `~/.codex/sessions/YYYY/MM/DD/rollout-<时间>-<uuid>.jsonl` |
-
-实测对比（同一任务）：
-
-| 来源 | 拿到的内容 |
-|---|---|
-| `capture-pane` 抓屏 | 30 行视口里的换行碎片，段落被硬切 |
-| **转录跟随** | **完整 4 段正文、格式与空行全对、无截断** |
-
-转录是结构化 JSONL，还能拿到屏幕上看不到的东西：`thinking` 块、完整 `tool_use`
-参数、token 用量。
-
-### 陈旧转录的陷阱
-
-跟随转录最容易犯的错是**误抓上一次任务留下的旧文件**——那样日志会显示过期内容，
-**比什么都不显示更坏**。所以 `transcript.py` 的判据是"相对启动时刻的**变化**"而不是
-"文件新不新"：
-
-- 启动时先 `snapshot_existing()` 拍下已存在文件的路径与大小
-- 精确目录（由 cwd 推算）里：只认**启动时不存在的新文件**，或**已知文件变大了**
-- 回退目录（全局搜索）里：**只认启动时完全不存在的新文件**
-
-## 指令模板的三个要点
-
-`conductor/prompt.py` 里的 `PROMPT_TEMPLATE` 决定 DSH 怎么干活。三条经验都是踩出来的：
-
-1. **必须明说"下级 agent 的自述不算证据"**，否则 DSH 会把下级的"已完成"直接转述成结论。
-2. **任务文本要走文件**（`--task "$(cat task.txt)"`），不能拼进命令行——
-   任意自然语言里的引号、换行、`$` 都会破坏 shell 命令。
-3. **必须指定结构化落盘**，并明确 `accepted` 只在**独立验证通过**时才可用。
-
-## 环境前提
-
-`DSH_PERMISSION_MODE` 固定为 `danger-full-access`。原因：DSH 要靠它的 `bash` 工具
-执行 `agent_task.py` 和验证命令。而 confining 沙箱在 Linux 需要 `bwrap` 或 `landlock`
-才可用——两者都缺时，**任何 confining 模式下 bash 都会被整体拒绝**
-（`SANDBOX_UNAVAILABLE`，fail-closed），整个工作流卡在第一步。
+运行目录位于 XDG state，而非工作区。`request.json` 与 `orchestrator-prompt.md` 保留精确输入，
+每轮 task/receipt 记录返工过程，`verdict.json` 保存最终结论。失败后可以运行
+`conductor show --run-id ...`，并根据输出中的 session 名 attach 到仍存活的 worker。

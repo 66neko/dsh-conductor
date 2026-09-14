@@ -1,75 +1,16 @@
-# ---------------------------------------------------------------------------
-# dsh-conductor 的忽略规则
-#
-# 原则：只忽略「生成物」和「本机状态」，凡是项目内容一律入库。
-# ---------------------------------------------------------------------------
-
-# --- 编排中间产物 ---------------------------------------------------------
-# conductor run 会在 --workspace 下建 .dsh-orchestrator/（task.txt + result.json）。
-# 如果直接用 --workspace . 跑，它就会落在仓库里，所以必须忽略。
-# 不加前导斜杠：任何深度都要忽略。
-.dsh-orchestrator/
-
-# --- Python 字节码与缓存 --------------------------------------------------
 __pycache__/
 *.py[cod]
-*$py.class
-*.so
-
-# --- 构建与打包产物 -------------------------------------------------------
+*.egg-info/
 build/
 dist/
-sdist/
-wheels/
-*.egg-info/
-*.egg
-.eggs/
-pip-wheel-metadata/
-
-# --- 虚拟环境 -------------------------------------------------------------
 .venv/
-venv/
-ENV/
-env/
-.python-version
-
-# --- 测试与静态检查缓存 ---------------------------------------------------
-.pytest_cache/
-.mypy_cache/
-.dmypy.json
 .ruff_cache/
-.tox/
-.nox/
+.mypy_cache/
 .coverage
-.coverage.*
-htmlcov/
-coverage.xml
-*.cover
-.hypothesis/
-
-# --- 凭据与本地配置（本项目的敏感面）--------------------------------------
-# 本项目通过 DSH 调用模型，凭据可能以环境变量或 .env 形式出现。
-# 真正的凭据在 $DSH_HOME/.credentials.yaml，不在仓库里；这里防的是误提交。
 .env
 .env.*
 !.env.example
 *.pem
 *.key
-credentials.yaml
-.credentials.yaml
-
-# --- 编辑器与操作系统 -----------------------------------------------------
-.vscode/
-!.vscode/extensions.json
-.idea/
-*.swp
-*.swo
-*~
-.DS_Store
-Thumbs.db
-desktop.ini
-
-# --- 本地临时文件 ---------------------------------------------------------
 *.log
 *.tmp
-/tmp/

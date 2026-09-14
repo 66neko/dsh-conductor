@@ -1,38 +1,18 @@
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "dsh-conductor"
-version = "0.1.0"
-description = "让 DSH（DeepSeek Harness）编排下级编码 agent 并独立验收"
+version = "0.2.0"
+description = "DSH-managed coding-agent delegation with independent verification"
 readme = "README.md"
-requires-python = ">=3.8"
-license = { text = "MIT" }
-keywords = ["dsh", "deepseek-harness", "claude-code", "codex", "tmux", "agent", "orchestration"]
-classifiers = [
-  "Programming Language :: Python :: 3",
-  "Topic :: Software Development :: Build Tools",
-]
-
-# 刻意保持零第三方依赖：全部用标准库实现。
-# 与 DSH 的通信是 JSON-RPC over stdio，转录跟随是文件读取，都不需要外部库。
+requires-python = ">=3.13"
+license = "MIT"
 dependencies = []
-
-[project.optional-dependencies]
-# 若改用官方 Python SDK 与 DSH 通信（见 README「与官方 SDK 的关系」）
-sdk = ["deepseek-harness-sdk"]
 
 [project.scripts]
 conductor = "conductor.cli:main"
 
-[project.urls]
-"DSH (DeepSeek Harness)" = "https://github.com/deepseek-ai/deepseek-harness"
-"DSH 文档" = "https://deepseek-harness.github.io/deepseek-harness/"
-
-[tool.setuptools]
-packages = ["conductor"]
-
-[tool.setuptools.package-data]
-# skill 随包分发；它是 tmux 驱动能力的唯一源
-conductor = ["../skills/tmux-coding-agents/**/*"]
+[tool.setuptools.packages.find]
+include = ["conductor*"]

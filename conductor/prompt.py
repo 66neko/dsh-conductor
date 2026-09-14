@@ -1,126 +1,137 @@
-"""编排与验收的指令模板。
-
-单独成文件是刻意的：**要让 DSH 换个方式干活，改这里就行**，不必碰 CLI 逻辑。
-模板里的 `{...}` 占位符由 {@link build_prompt} 填充。
-
-写这类 prompt 的三条经验（都是实测得来的）：
-
-1. **必须明说"下级 agent 的自述不算证据"**。否则 DSH 容易把下级 agent 的
-   "已完成" 直接转述成验收结论，验收就退化成橡皮图章。
-2. **任务文本要走文件，不能拼进命令行**。任意自然语言里的引号、换行、`$`
-   都会破坏 shell 命令；`--task "$(cat task.txt)"` 是安全的写法。
-3. **必须指定结构化落盘**。结论写成文件才是事实——调用方靠这个文件判断成败，
-   而不是去解析模型的自然语言回复。
-"""
+"""为一个不可变运行目录生成 DSH 管理者契约。"""
 
 from __future__ import annotations
 
-PROMPT_TEMPLATE = """你是任务编排器。严格按步骤执行，不要跳步。
+import json
+import shlex
+from pathlib import Path
 
-# 总目标
-让下级的编码 agent 在目录 `{workspace}` 中完成下面这个任务，**由你独立验收**，
-确认真正完成后把结构化结果落盘。
+from .state import RunState
 
-## 用户任务
-{task}
 
-## 验收标准
-{verify}
-
-# 执行步骤
-
-## 1. 委派给下级 agent
-先加载 `tmux-coding-agents` skill（用 skill 工具，skill 名就是 `tmux-coding-agents`），
-阅读它的说明，然后按它的方式启动下级 agent。任务文本已存在文件里，
-**必须用文件读取而不是把内容拼进命令行**，以免引号/换行破坏命令：
-
-```bash
-TASK="$(cat {task_file})"
-python3 {skill}/scripts/agent_task.py run --agent {agent_kind} --cwd {workspace} \\
-    --task "$TASK" --session {session} --keep --timeout-ms 900000
-```
-
-`--keep` 会保留下级会话，便于验收不通过时追加指令。
-
-## 2. 独立验收（关键步骤，不可省略）
-下级 agent 的自述**不算证据**。你必须自己动手核实：
-- 用 bash 的 `ls` 确认产物文件确实存在于 `{workspace}` 下
-- 用 `read` 工具读取产物内容，逐条对照验收标准
-- 尽可能做实际验证（例如检查 HTML 是否含必需标签、脚本是否真能运行）
-
-## 3. 不通过则修正并重验
-若验收不通过，向**同一个**下级会话追加具体修正要求，然后重新验收：
-
-```bash
-python3 {skill}/scripts/agent_task.py send --session {session} --text "具体问题与修正要求"
-python3 {skill}/scripts/agent_task.py settle --session {session} --quiet-ms 4000
-```
-
-最多重试 {max_attempts} 轮。每轮都要重新执行步骤 2 的独立验收。
-
-## 4. 落盘结构化结果（必须做，无论成败）
-用 `write` 工具把结果写入 `{result_file}`，内容为**严格 JSON**（不要加注释、不要加代码块围栏）：
-
-{{
-  "status": "accepted",
-  "task": "用户任务原文",
-  "attempts": 1,
-  "artifacts": ["产物文件相对于工作目录的路径"],
-  "verification": "你实际执行了哪些验证命令、观察到什么具体结果",
-  "claude_last_message": "下级 agent 的最后回复",
-  "notes": "遗留问题或补充说明"
-}}
-
-`status` 取值规则：
-- `"accepted"` — **仅当**你已独立验证产物确实符合验收标准
-- `"rejected"` — 达到重试上限仍不符合，或根本无法验证
-
-`attempts` 是实际委派轮次（整数）。`artifacts` 只列真实存在且已核实的文件。
-
-## 5. 收尾
-验收通过就关闭会话：
-
-```bash
-python3 {skill}/scripts/agent_task.py close --session {session}
-```
-
-最后用**一句话**总结：状态（accepted/rejected）、产物文件、验收结论。
-"""
+def _command(parts: list[str]) -> str:
+    return shlex.join(parts)
 
 
 def build_prompt(
+    state: RunState,
     *,
-    workspace: str,
-    task: str,
-    verify: str,
-    task_file: str,
-    result_file: str,
-    skill_dir: str,
-    session: str,
-    agent_kind: str,
+    skill_script: Path,
     max_attempts: int,
+    attempt_timeout_seconds: int,
+    keep_session: bool,
 ) -> str:
-    """填充编排 prompt。
-
-    @param workspace - 下级 agent 的工作目录（绝对路径）
-    @param task - 用户任务原文
-    @param verify - 验收标准，越具体验收越可靠
-    @param task_file - 任务文本落盘路径（供 DSH 用 `cat` 读取，避免命令行转义问题）
-    @param result_file - DSH 必须写入的结构化结论路径
-    @param skill_dir - `tmux-coding-agents` skill 所在目录
-    @param session - tmux 会话名
-    @param agent_kind - `claude` 或 `codex`
-    @param max_attempts - 最多委派轮次
-    @returns 完整的编排指令
-    """
-    return PROMPT_TEMPLATE.format(
-        workspace=workspace,
-        task=task,
-        verify=verify,
-        task_file=task_file,
-        result_file=result_file,
-        skill=skill_dir,
-        session=session,
-        agent_kind=agent_kind,
-        max_attempts=max_attempts,
+    # 命令由 conductor 预先完整生成，避免 DSH 在关键路径上自行拼接路径或 token。
+    first = state.attempts[0]
+    run_command = _command(
+        [
+            "python3.13",
+            str(skill_script),
+            "run",
+            "--workspace",
+            str(state.workspace),
+            "--session",
+            state.session,
+            "--task-file",
+            str(first.task_file),
+            "--receipt",
+            str(first.receipt_file),
+            "--token",
+            first.token,
+            "--timeout-seconds",
+            str(attempt_timeout_seconds),
+        ]
     )
+    close_command = _command(
+        ["python3.13", str(skill_script), "close", "--session", state.session]
+    )
+    verdict_example = {
+        "schema_version": 1,
+        "run_id": state.run_id,
+        "status": "accepted",
+        "agent": state.agent.value,
+        "attempts": 1,
+        "artifacts": ["relative/path"],
+        "checks": [
+            {
+                "criterion": "one concrete acceptance criterion",
+                "method": "command or direct inspection performed by DSH",
+                "evidence": "specific observed output or file content",
+                "passed": True,
+            }
+        ],
+        "summary": "concise verdict",
+        "remaining_issues": [],
+    }
+    retry_blocks: list[str] = []
+    for attempt in state.attempts[1:]:
+        send_command = _command(
+            [
+                "python3.13",
+                str(skill_script),
+                "send",
+                "--session",
+                state.session,
+                "--task-file",
+                str(attempt.task_file),
+                "--receipt",
+                str(attempt.receipt_file),
+                "--token",
+                attempt.token,
+                "--timeout-seconds",
+                str(attempt_timeout_seconds),
+            ]
+        )
+        retry_blocks.append(f"Attempt {attempt.number}:\n\n```bash\n{send_command}\n```")
+    retry_commands = "\n\n".join(retry_blocks) or "No retry attempts are available."
+    keep_instruction = (
+        "Keep the tmux session after writing the verdict."
+        if keep_session
+        else f"After the verdict is durable, close the worker session with `{close_command}`."
+    )
+    return f"""You are the manager and independent verifier for one coding task.
+
+Run identity and all paths are recorded in `{state.request_file}`. Read that JSON file, the task
+file, and the acceptance file before acting. The immutable run id is `{state.run_id}` and the
+workspace is `{state.workspace}`.
+
+Load the `{state.agent.skill_name}` skill now. Use only that skill to control the worker. Start the
+first worker turn with this exact command:
+
+```bash
+{run_command}
+```
+
+The worker command succeeds only after a token-bound receipt appears. That receipt means the worker
+has stopped editing and is ready for inspection. It is a handoff signal, not evidence that the task
+is correct. Never accept the task from the receipt, terminal text, or the worker's own claims.
+
+After every worker turn, independently inspect the workspace. Read the produced files yourself and
+run the commands needed to test every acceptance criterion. Record concrete observations, including
+command results and relevant content. A check copied from the worker is invalid. Do not modify the
+deliverables yourself.
+
+When a check fails and another attempt remains, write a focused correction request to that attempt's
+task file. Include the failed criterion, your observed evidence, and the required correction. Submit
+it to the same tmux session with the corresponding exact command below:
+
+{retry_commands}
+
+Re-run all relevant verification after each attempt. Use at most {max_attempts} attempts.
+
+Write a verdict whether the task passes, fails, is blocked, or the worker command fails. The verdict
+path is `{state.verdict_file}`. First write `{state.verdict_file}.tmp`, parse it with Python 3.13 to
+confirm it is valid JSON, then rename it atomically to the verdict path. Use this exact schema:
+
+```json
+{json.dumps(verdict_example, ensure_ascii=False, indent=2)}
+```
+
+Set `status` to `accepted` only when every required check passed from your own inspection. For a
+rejected verdict, include failed checks and non-empty `remaining_issues`. Artifact paths must be
+relative to the workspace and must identify files you personally confirmed. `attempts` is the number
+of worker turns actually submitted.
+
+{keep_instruction}
+Finish with a short summary after the verdict file exists.
+"""
