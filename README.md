@@ -95,7 +95,7 @@ python3.13 ~/.codex/skills/.system/skill-creator/scripts/quick_validate.py skill
 
 ## 发布
 
-推送 GitHub Release 后，`.github/workflows/publish.yml` 会使用 PyPI Trusted Publishing
-自动构建并发布 wheel 与 sdist。首次发布前，需要在 PyPI 为项目配置 GitHub Actions 的
-Trusted Publisher，仓库名为 `66neko/dsh-conductor`，工作流为 `publish.yml`，环境名为
-`pypi`。
+推送 GitHub Release 后，`.github/workflows/publish.yml` 会先在独立 job 中运行测试并构建
+发行包，再用 PyPI Trusted Publishing 上传已验证的 wheel 与 sdist。首次发布前，需要在
+PyPI 为 GitHub Actions 配置 Trusted Publisher，并在 GitHub 创建 `pypi` 环境。完整字段、
+版本标签规则和发布步骤见 [`docs/pypi-publishing.md`](docs/pypi-publishing.md)。

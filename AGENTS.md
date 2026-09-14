@@ -17,6 +17,7 @@
 | `conductor/skills.py` | skill 定位、复制到 workspace 与环境可用性检查 |
 | `skills/tmux-claude-code` | Claude Code 专属 tmux 控制 skill |
 | `skills/tmux-codex` | Codex 专属 tmux 控制 skill |
+| `.github/workflows/publish.yml` | 分离构建与 OIDC 发布 job，上传 PyPI 发行包 |
 
 ## 不变量
 
@@ -41,5 +42,7 @@ python3.13 -m conductor run --workspace /tmp/work --prompt '请使用 Codex 创�
 python3.13 -m unittest discover -v
 python3.13 -m compileall -q conductor skills tests
 ```
+
+PyPI Trusted Publishing 的配置、版本标签和发布流程见 `docs/pypi-publishing.md`。
 
 修改流程或话术时编辑 `conductor/prompt.py`；修改进度事件时编辑 `conductor/progress.py`；修改 agent 启动参数或弹窗规则时编辑对应 `conductor/agents/*.py` 和 skill 文档；修改日志来源时编辑 `conductor/worker_log.py`。

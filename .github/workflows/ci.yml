@@ -23,6 +23,27 @@ jobs:
       - name: 编译检查
         run: python -m compileall -q conductor skills tests
       - name: 构建发布包
-        run: python -m pip install build twine && python -m build
+        run: python -m pip install --upgrade build twine check-wheel-contents && python -m build --sdist --wheel
       - name: 检查发布包
         run: python -m twine check dist/*
+      - name: 检查 wheel 内容
+        run: python -m check_wheel_contents dist/*.whl
+      - name: 验证 wheel 安装后的 skill
+        run: |
+          TEST_ENV="$RUNNER_TEMP/dsh-conductor-wheel-env"
+          python -m venv "$TEST_ENV"
+          "$TEST_ENV/bin/python" -m pip install --no-deps dist/*.whl
+          "$TEST_ENV/bin/python" - <<'PY'
+          from pathlib import Path
+          from tempfile import TemporaryDirectory
+
+          from conductor.models import AgentKind
+          from conductor.skills import prepare_workspace_skills, source_skill
+
+          with TemporaryDirectory() as directory:
+              root = prepare_workspace_skills(Path(directory))
+              for kind in AgentKind:
+                  assert (source_skill(kind) / "SKILL.md").is_file()
+                  assert (root / kind.skill_name / "SKILL.md").is_file()
+                  assert (root / kind.skill_name / "scripts" / kind.script_name).is_file()
+          PY
