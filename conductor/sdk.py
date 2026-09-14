@@ -10,7 +10,11 @@ from .dsh import DshClient, DshConfig, DshError, RunResult
 from .models import ExecutionPlan, JsonObject, RecordError, Verdict
 from .progress import EventCallback, ProgressReporter
 from .prompt import build_prompt
-from .skills import available_agent_skills, dsh_home
+from .skills import (
+    available_workspace_agent_skills,
+    dsh_home,
+    prepare_workspace_skills,
+)
 from .state import RunState, default_state_root
 from .worker_log import WorkerLogFollower
 
@@ -156,7 +160,9 @@ class Conductor:
         config = self.config
         home = dsh_home(config.dsh_home)
         try:
-            skill_scripts, available_agents = available_agent_skills(home)
+            # 直接覆盖项目级目录，确保 DSH 使用当前 SDK 随包的两个 skill。
+            skill_root = prepare_workspace_skills(self.workspace)
+            skill_scripts, available_agents = available_workspace_agent_skills(self.workspace)
             state = RunState.create(
                 state_root=config.state_dir,
                 workspace=self.workspace,
@@ -216,6 +222,7 @@ class Conductor:
                     provider=config.provider,
                     model=config.model,
                     dsh_home=home,
+                    skill_dir=skill_root,
                     init_timeout_seconds=config.dsh_init_timeout_seconds,
                     shutdown_timeout_seconds=config.dsh_shutdown_timeout_seconds,
                     extra_env=dict(config.dsh_extra_env),

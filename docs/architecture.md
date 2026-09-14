@@ -56,7 +56,7 @@ attempts/<agent>/<n>/
 
 ## 两个独立 skill
 
-`skills/tmux-claude-code/` 和 `skills/tmux-codex/` 各自包含中文 `SKILL.md` 与控制器脚本。它们共享 tmux 文本传输和 token receipt 协议，但维护各自的启动参数、菜单提示和就绪规则。`conductor install-skills` 只创建指向仓库源目录的软链；SDK 不负责安装 DSH。
+`skills/tmux-claude-code/` 和 `skills/tmux-codex/` 各自包含中文 `SKILL.md` 与控制器脚本。它们共享 tmux 文本传输和 token receipt 协议，但维护各自的启动参数、菜单提示和就绪规则。SDK 在启动 DSH 前，将两个 skill 直接复制到 `<workspace>/.dsh/skills/` 并覆盖同名目录；该目录是 DSH 的项目级 skill 根，不会污染 `~/.dsh/skills`。`conductor install-skills --workspace <path>` 可以手动提前完成复制；SDK 不负责安装 DSH。
 
 ## tmux 日志采集
 

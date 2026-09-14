@@ -141,6 +141,7 @@ class DshConfig:
     provider: str = "deepseek-official"
     model: str = "deepseek-flash"
     dsh_home: Path | None = None
+    skill_dir: Path | None = None
     init_timeout_seconds: float = 30.0
     shutdown_timeout_seconds: float = 5.0
     extra_env: dict[str, str] = field(default_factory=dict)
@@ -214,10 +215,20 @@ class DshClient:
             return self
         environment = os.environ.copy()
         environment.update(self.config.extra_env)
+        package_root = str(Path(__file__).resolve().parent.parent)
+        python_path = environment.get("PYTHONPATH")
+        environment["PYTHONPATH"] = (
+            package_root
+            if not python_path
+            else os.pathsep.join((package_root, python_path))
+        )
         # 这是 DSH 执行 skill 和验收命令的必要条件，调用方不能通过 extra_env 覆盖。
         environment["DSH_PERMISSION_MODE"] = "danger-full-access"
         if self.config.dsh_home is not None:
             environment["DSH_HOME"] = str(self.config.dsh_home.expanduser().resolve())
+        if self.config.skill_dir is not None:
+            # 让 DSH 将 SDK 注入的项目级目录作为随包 skill 根目录扫描。
+            environment["DSH_BUNDLED_SKILL_DIR"] = str(self.config.skill_dir.expanduser().resolve())
         try:
             self._process = subprocess.Popen(
                 self._command(),

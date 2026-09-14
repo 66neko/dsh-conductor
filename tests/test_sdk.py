@@ -7,8 +7,6 @@ from pathlib import Path
 
 from conductor.progress import RunEvent
 from conductor.sdk import Conductor, ConductorConfig
-from conductor.models import AgentKind
-from conductor.skills import source_skill
 
 
 class SdkTests(unittest.TestCase):
@@ -18,12 +16,7 @@ class SdkTests(unittest.TestCase):
             workspace = Path(directory) / "workspace"
             workspace.mkdir()
             dsh_home = Path(directory) / "dsh-home"
-            (dsh_home / "skills").mkdir(parents=True)
-            for kind in AgentKind:
-                (dsh_home / "skills" / kind.skill_name).symlink_to(
-                    source_skill(kind),
-                    target_is_directory=True,
-                )
+            dsh_home.mkdir()
             # fixture 直接写协议文件，不执行真正 worker。
             config = ConductorConfig(
                 dsh_bin=str(fixture),
@@ -45,6 +38,8 @@ class SdkTests(unittest.TestCase):
             self.assertTrue(any(event.kind == "turn_end" for event in events))
             self.assertEqual(events[-1].kind, "run_end")
             self.assertTrue((workspace / "fixture.txt").exists())
+            self.assertTrue((workspace / ".dsh" / "skills" / "tmux-claude-code" / "SKILL.md").is_file())
+            self.assertTrue((workspace / ".dsh" / "skills" / "tmux-codex" / "SKILL.md").is_file())
 
 
 if __name__ == "__main__":

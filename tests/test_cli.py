@@ -9,11 +9,22 @@ from pathlib import Path
 from unittest import mock
 
 from conductor.cli import main
-from conductor.models import AgentKind
-from conductor.skills import source_skill
 
 
 class CliTests(unittest.TestCase):
+    def test_install_skills_targets_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "workspace"
+            workspace.mkdir()
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                code = main(["install-skills", "--workspace", str(workspace)])
+            output = json.loads(stdout.getvalue())
+            self.assertEqual(code, 0)
+            self.assertEqual(output["skill_dir"], str(workspace / ".dsh" / "skills"))
+            self.assertTrue((workspace / ".dsh" / "skills" / "tmux-claude-code" / "SKILL.md").is_file())
+            self.assertTrue((workspace / ".dsh" / "skills" / "tmux-codex" / "SKILL.md").is_file())
+
     def test_run_keeps_stdout_as_one_json_object(self) -> None:
         fixture = Path(__file__).parent / "fixtures" / "fake_dsh.py"
         with tempfile.TemporaryDirectory() as directory:
@@ -21,12 +32,7 @@ class CliTests(unittest.TestCase):
             workspace = root / "workspace"
             workspace.mkdir()
             home = root / "dsh-home"
-            (home / "skills").mkdir(parents=True)
-            for kind in AgentKind:
-                (home / "skills" / kind.skill_name).symlink_to(
-                    source_skill(kind),
-                    target_is_directory=True,
-                )
+            home.mkdir()
             stdout = io.StringIO()
             stderr = io.StringIO()
             with (

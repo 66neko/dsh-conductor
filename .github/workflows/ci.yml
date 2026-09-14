@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+      - name: 安装 Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: 运行测试
+        run: python -m unittest discover -v
+      - name: 编译检查
+        run: python -m compileall -q conductor skills tests
+      - name: 构建发布包
+        run: python -m pip install build twine && python -m build
+      - name: 检查发布包
+        run: python -m twine check dist/*

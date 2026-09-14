@@ -9,7 +9,24 @@ description = "DSH-managed coding-agent delegation with independent verification
 readme = "README.md"
 requires-python = ">=3.13"
 license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Yu", email = "66neko@users.noreply.github.com" }]
+keywords = ["dsh", "deepseek", "tmux", "claude-code", "codex", "orchestration", "sdk"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: POSIX",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
 dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/66neko/dsh-conductor"
+Repository = "https://github.com/66neko/dsh-conductor"
+Issues = "https://github.com/66neko/dsh-conductor/issues"
 
 [project.scripts]
 conductor = "conductor.cli:main"

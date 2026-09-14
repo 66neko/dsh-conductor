@@ -58,6 +58,33 @@ class DshClientTests(unittest.TestCase):
                 result = client.run("test", session_id="fixture", timeout_seconds=2)
         self.assertEqual(result.status, "completed")
 
+    def test_skill_directory_is_passed_to_dsh(self) -> None:
+        fixture = Path(__file__).parent / "fixtures" / "fake_dsh.py"
+        with tempfile.TemporaryDirectory() as directory:
+            skill_dir = Path(directory) / "skills"
+            skill_dir.mkdir()
+            config = DshConfig(
+                workspace=Path(directory),
+                dsh_bin=str(fixture),
+                skill_dir=skill_dir,
+                extra_env={"FAKE_DSH_CHECK_SKILL_DIR": "1"},
+            )
+            with DshClient(config) as client:
+                result = client.run("test", session_id="fixture", timeout_seconds=2)
+        self.assertEqual(result.status, "completed")
+
+    def test_package_root_is_available_to_worker_scripts(self) -> None:
+        fixture = Path(__file__).parent / "fixtures" / "fake_dsh.py"
+        with tempfile.TemporaryDirectory() as directory:
+            config = DshConfig(
+                workspace=Path(directory),
+                dsh_bin=str(fixture),
+                extra_env={"FAKE_DSH_CHECK_PYTHONPATH": "1"},
+            )
+            with DshClient(config) as client:
+                result = client.run("test", session_id="fixture", timeout_seconds=2)
+        self.assertEqual(result.status, "completed")
+
 
 if __name__ == "__main__":
     unittest.main()

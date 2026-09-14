@@ -29,6 +29,16 @@ for line in sys.stdin:
             and os.environ.get("DSH_PERMISSION_MODE") != "danger-full-access"
         ):
             emit({"jsonrpc": "2.0", "id": request_id, "error": {"code": -1, "message": "bad permission"}})
+        elif (
+            os.environ.get("FAKE_DSH_CHECK_SKILL_DIR")
+            and not Path(os.environ.get("DSH_BUNDLED_SKILL_DIR", "")).is_dir()
+        ):
+            emit({"jsonrpc": "2.0", "id": request_id, "error": {"code": -1, "message": "bad skill dir"}})
+        elif (
+            os.environ.get("FAKE_DSH_CHECK_PYTHONPATH")
+            and str(Path(__file__).resolve().parents[2]) not in os.environ.get("PYTHONPATH", "").split(os.pathsep)
+        ):
+            emit({"jsonrpc": "2.0", "id": request_id, "error": {"code": -1, "message": "bad python path"}})
         else:
             emit({"jsonrpc": "2.0", "id": request_id, "result": {"ok": True}})
     elif method == "session/prompt":

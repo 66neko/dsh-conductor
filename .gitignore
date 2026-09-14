@@ -6,6 +6,7 @@ dist/
 .venv/
 .ruff_cache/
 .mypy_cache/
+.dsh/skills/
 .coverage
 .env
 .env.*

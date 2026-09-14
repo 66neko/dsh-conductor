@@ -16,7 +16,11 @@ from .dsh import DshError, probe_dsh
 from .models import AgentKind, RecordError, read_json_object
 from .progress import RunEvent
 from .sdk import Conductor, ConductorConfig, ConductorError
-from .skills import dsh_home, install_link, installed_skill, source_skill
+from .skills import (
+    dsh_home,
+    prepare_workspace_skills,
+    source_skill,
+)
 from .state import default_state_root
 
 type JsonObject = dict[str, Any]
@@ -33,22 +37,30 @@ def _event_to_stderr(event: RunEvent) -> None:
 
 
 def cmd_install_skills(args: argparse.Namespace) -> int:
-    home = dsh_home(args.dsh_home)
+    workspace = args.workspace.expanduser().resolve()
+    if not workspace.is_dir():
+        raise DshError(f"workspace is not a directory: {workspace}")
+    skill_root = prepare_workspace_skills(workspace)
     records: list[JsonObject] = []
     for kind in AgentKind:
         source = source_skill(kind)
-        target = home / "skills" / kind.skill_name
-        status, backup = install_link(source, target)
+        target = skill_root / kind.skill_name
         record: JsonObject = {
             "name": kind.skill_name,
-            "status": status,
+            "status": "overwritten",
             "source": str(source),
             "target": str(target),
         }
-        if backup:
-            record["backup"] = backup
         records.append(record)
-    _json({"schema_version": 1, "status": "ok", "skills": records})
+    _json(
+        {
+            "schema_version": 1,
+            "status": "ok",
+            "workspace": str(workspace),
+            "skill_dir": str(skill_root),
+            "skills": records,
+        }
+    )
     return 0
 
 
@@ -69,7 +81,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     available_workers: list[str] = []
     for kind in AgentKind:
         try:
-            add(kind.skill_name, True, installed_skill(kind, home))
+            add(kind.skill_name, True, source_skill(kind))
         except DshError as exc:
             add(kind.skill_name, False, exc)
         binary = shutil.which(kind.value)
@@ -196,8 +208,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="tmux worker 屏幕采样间隔，默认 5 秒",
     )
     run.set_defaults(func=cmd_run)
-    install = commands.add_parser("install-skills")
-    install.add_argument("--dsh-home", type=Path)
+    install = commands.add_parser("install-skills", help="将两个 skill 复制到指定 workspace")
+    install.add_argument("--workspace", type=Path, required=True)
     install.set_defaults(func=cmd_install_skills)
     doctor = commands.add_parser("doctor")
     doctor.add_argument("--dsh-bin")

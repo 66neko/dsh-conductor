@@ -52,14 +52,16 @@ print(result.verdict.summary)
 CLI 是 SDK 的薄封装，保留给脚本和人工调用：
 
 ```bash
-python3.13 -m conductor install-skills
+python3.13 -m conductor install-skills --workspace /path/to/project
 python3.13 -m conductor doctor
 python3.13 -m conductor run \
   --workspace /path/to/project \
   --prompt '请使用 Claude Code 创建 hello.txt。验收标准：文件存在且内容为 Hello。'
 ```
 
-`run` 的 stdout 始终只有一个 JSON 对象；实时事件由 CLI 写入 stderr，因此可以安全地重定向 stdout。`show` 可读取最近一次运行的 request、用户 prompt、manager prompt、plan、verdict 和日志路径。
+`run` 的 stdout 始终只有一个 JSON 对象；实时事件由 CLI 写入 stderr，因此可以安全地重定向 stdout。每次运行启动 DSH 前，SDK 都会把包内两个 skill 直接覆盖到 `<workspace>/.dsh/skills/`，供 DSH 项目级发现；不会写入 `~/.dsh/skills`，任务结束后也不会删除。`install-skills --workspace` 可提前执行同样的复制操作。`show` 可读取最近一次运行的 request、用户 prompt、manager prompt、plan、verdict 和日志路径。
+
+`.dsh/skills/` 是 SDK 生成的运行目录，建议加入项目的 Git 忽略规则。
 
 ## 日志与状态
 
@@ -90,3 +92,10 @@ python3.13 -m unittest discover -v
 python3.13 ~/.codex/skills/.system/skill-creator/scripts/quick_validate.py skills/tmux-claude-code
 python3.13 ~/.codex/skills/.system/skill-creator/scripts/quick_validate.py skills/tmux-codex
 ```
+
+## 发布
+
+推送 GitHub Release 后，`.github/workflows/publish.yml` 会使用 PyPI Trusted Publishing
+自动构建并发布 wheel 与 sdist。首次发布前，需要在 PyPI 为项目配置 GitHub Actions 的
+Trusted Publisher，仓库名为 `66neko/dsh-conductor`，工作流为 `publish.yml`，环境名为
+`pypi`。

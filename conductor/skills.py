@@ -1,11 +1,13 @@
-"""定位、安装并检查 conductor 随包提供的 DSH skills。"""
+"""定位并准备 conductor 随包提供的 DSH skills。
+
+默认把 skill 放在当前 workspace 的 ``.dsh/skills``，让 DSH 只在本项目中发现它们。
+"""
 
 from __future__ import annotations
 
 import os
 import shutil
 import sysconfig
-import time
 from pathlib import Path
 
 from .dsh import DshError
@@ -26,6 +28,8 @@ def _skill_roots() -> tuple[Path, ...]:
     roots.extend(
         [
             REPO_ROOT / "skills",
+            # pip --target 会把 data-files 放在目标目录，而不是当前解释器的 data 目录。
+            Path(__file__).resolve().parent.parent / "share" / "dsh-conductor" / "skills",
             Path(sysconfig.get_path("data")) / "share" / "dsh-conductor" / "skills",
         ]
     )
@@ -41,46 +45,48 @@ def source_skill(kind: AgentKind) -> Path:
     raise DshError(f"cannot find bundled skill {kind.skill_name}; searched: {searched}")
 
 
-def installed_skill(kind: AgentKind, home: Path) -> Path:
-    path = home / "skills" / kind.skill_name
-    script = path / "scripts" / kind.script_name
-    if not path.is_symlink() or not script.is_file():
-        raise DshError(
-            f"{kind.skill_name} is not installed as a valid symlink; "
-            "run `conductor install-skills`"
-        )
-    return path.resolve()
+def workspace_skill_root(workspace: Path) -> Path:
+    """返回 DSH 项目级 skill 根目录。"""
+
+    return workspace.expanduser().resolve() / ".dsh" / "skills"
 
 
-def install_link(source: Path, target: Path) -> tuple[str, str | None]:
-    target.parent.mkdir(parents=True, exist_ok=True)
-    if target.is_symlink() and target.resolve(strict=False) == source:
-        return "unchanged", None
-    backup: str | None = None
-    if target.is_symlink():
-        target.unlink()
-    elif target.exists():
-        # 真实目录可能包含用户内容，先备份再建立唯一来源的软链。
-        backup_path = target.with_name(f"{target.name}.backup-{int(time.time())}")
-        shutil.move(target, backup_path)
-        backup = str(backup_path)
-    target.symlink_to(source, target_is_directory=True)
-    return "installed", backup
+def _remove_path(path: Path) -> None:
+    """删除待覆盖的文件、目录或软链。"""
+
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.is_dir():
+        shutil.rmtree(path)
 
 
-def available_agent_skills(home: Path) -> tuple[dict[AgentKind, Path], set[AgentKind]]:
-    """返回可生成命令的脚本路径，以及当前真正可委派的 agent 集合。"""
+def prepare_workspace_skills(workspace: Path) -> Path:
+    """把随包 skill 直接覆盖到 workspace 的项目级目录并返回该目录。"""
 
+    root = workspace_skill_root(workspace)
+    root.mkdir(parents=True, exist_ok=True)
+    # 先解析全部源目录，避免中途缺文件时只覆盖了一部分 skill。
+    sources = {kind: source_skill(kind) for kind in AgentKind}
+    for kind, source in sources.items():
+        target = root / kind.skill_name
+        # 直接删除旧版本，避免源目录删掉文件后目标残留旧内容。
+        _remove_path(target)
+        shutil.copytree(source, target)
+    return root
+
+
+def available_workspace_agent_skills(workspace: Path) -> tuple[dict[AgentKind, Path], set[AgentKind]]:
+    """检查项目级 skill，并返回可用 worker。"""
+
+    root = workspace_skill_root(workspace)
     scripts: dict[AgentKind, Path] = {}
     available: set[AgentKind] = set()
     for kind in AgentKind:
-        source = source_skill(kind)
-        scripts[kind] = source / "scripts" / kind.script_name
-        try:
-            installed = installed_skill(kind, home)
-        except DshError:
+        path = root / kind.skill_name
+        script = path / "scripts" / kind.script_name
+        if not (path / "SKILL.md").is_file() or not script.is_file():
             continue
-        scripts[kind] = installed / "scripts" / kind.script_name
+        scripts[kind] = script
         if shutil.which(kind.value):
             available.add(kind)
     return scripts, available

@@ -14,7 +14,7 @@
 | `conductor/prompt.py` | 发给 DSH 的中文拆解、委派、监督和验收契约 |
 | `conductor/progress.py` | `RunEvent`、DSH 协议进度、心跳和 worker 日志事件 |
 | `conductor/worker_log.py` | 轮询精确 tmux 会话并持久化屏幕变化 |
-| `conductor/skills.py` | skill 定位、安装软链与环境可用性检查 |
+| `conductor/skills.py` | skill 定位、复制到 workspace 与环境可用性检查 |
 | `skills/tmux-claude-code` | Claude Code 专属 tmux 控制 skill |
 | `skills/tmux-codex` | Codex 专属 tmux 控制 skill |
 
@@ -28,14 +28,14 @@
 6. worker 是否完成只认绑定 token 的 receipt 文件；不解析自然语言、屏幕稳定或产物出现。
 7. 验收只认 schema v2 verdict，并再次绑定 run id、plan agent、criterion id、receipt token 和工作区路径。
 8. `DSH_PERMISSION_MODE` 必须是 `danger-full-access`，由 DSH 客户端强制设置。
-9. 两个 skill 只有仓库中的源码，安装操作只建立软链；修改 skill 时同步中文 `SKILL.md`。
+9. 两个 skill 只有仓库中的源码；运行前直接覆盖到 `<workspace>/.dsh/skills`，不写入全局目录；修改 skill 时同步中文 `SKILL.md`。
 10. tmux 文本通过 buffer/paste 传递，不能把自然语言直接拼入 shell 命令。
 11. `project/` 是用户目录，除非用户明确要求，不修改、不删除、不提交。
 
 ## 常用命令
 
 ```bash
-python3.13 -m conductor install-skills
+python3.13 -m conductor install-skills --workspace /tmp/work
 python3.13 -m conductor doctor
 python3.13 -m conductor run --workspace /tmp/work --prompt '请使用 Codex 创建 a.txt。验收标准：a.txt 存在。'
 python3.13 -m unittest discover -v
