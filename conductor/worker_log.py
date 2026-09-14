@@ -116,7 +116,7 @@ class WorkerLogFollower:
         agent: str,
         log_file: Path,
         sink: LogSink,
-        interval_seconds: float = 2.0,
+        interval_seconds: float = 5.0,
         history_lines: int = 200,
         max_lines_per_update: int = 12,
     ) -> None:

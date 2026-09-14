@@ -189,7 +189,12 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--quiet", action="store_true")
     run.add_argument("--heartbeat-seconds", type=_positive_float, default=10.0)
     run.add_argument("--worker-log", action=argparse.BooleanOptionalAction, default=True)
-    run.add_argument("--worker-log-interval-seconds", type=_positive_float, default=2.0)
+    run.add_argument(
+        "--worker-log-interval-seconds",
+        type=_positive_float,
+        default=5.0,
+        help="tmux worker 屏幕采样间隔，默认 5 秒",
+    )
     run.set_defaults(func=cmd_run)
     install = commands.add_parser("install-skills")
     install.add_argument("--dsh-home", type=Path)

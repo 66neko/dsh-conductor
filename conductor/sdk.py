@@ -57,7 +57,7 @@ class ConductorConfig:
     keep_session: bool = False
     heartbeat_seconds: float = 10.0
     worker_log: bool = True
-    worker_log_interval_seconds: float = 2.0
+    worker_log_interval_seconds: float = 5.0
     dsh_init_timeout_seconds: float = 30.0
     dsh_shutdown_timeout_seconds: float = 5.0
     dsh_extra_env: dict[str, str] = field(default_factory=dict)

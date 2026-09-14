@@ -45,7 +45,7 @@ print(result.verdict.summary)
 
 被 DSH 拒绝是正常业务结果，`result.accepted` 为 `False`；DSH 启动失败、协议失败或结果文件不合法时抛出 `ConductorError`。
 
-完整示例见 [`examples/quickstart.py`](examples/quickstart.py)。
+完整字段、嵌套对象、错误结果和实时事件格式见 [`docs/result-json.md`](docs/result-json.md)。可运行示例见 [`examples/quickstart.py`](examples/quickstart.py)。
 
 ## CLI
 
@@ -63,7 +63,7 @@ python3.13 -m conductor run \
 
 ## 日志与状态
 
-conductor 会同时轮询两个候选 tmux 会话；DSH 选择哪个 agent 后，只有实际存在的会话产生屏幕日志。变化会通过 `RunEvent(source="claude"/"codex", kind="worker_output")` 回调，并追加到 `worker-screen.log`。屏幕文字不会被当作完成或验收信号。
+conductor 会同时轮询两个候选 tmux 会话；DSH 选择哪个 agent 后，只有实际存在的会话产生屏幕日志。默认每 5 秒采样一次，SDK 可通过 `ConductorConfig(worker_log_interval_seconds=...)` 调整，CLI 可通过 `--worker-log-interval-seconds` 调整。变化会通过 `RunEvent(source="claude"/"codex", kind="worker_output")` 回调，并追加到 `worker-screen.log`。屏幕文字不会被当作完成或验收信号。
 
 状态目录默认是 `$XDG_STATE_HOME/dsh-conductor`，未设置时为 `~/.local/state/dsh-conductor`：
 
