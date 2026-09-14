@@ -129,7 +129,19 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 
 def cmd_show(args: argparse.Namespace) -> int:
-    state_root = args.state_dir.expanduser().resolve()
+    if args.state_dir is not None:
+        state_root = args.state_dir.expanduser().resolve()
+    elif args.workspace is not None:
+        state_root = default_state_root(args.workspace)
+    else:
+        _json(
+            {
+                "schema_version": 1,
+                "status": "error",
+                "error": "show requires --workspace unless --state-dir is provided",
+            }
+        )
+        return 1
     if args.run_id:
         run_root = state_root / "runs" / args.run_id
     else:
@@ -196,7 +208,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--model", default="deepseek-flash")
     run.add_argument("--dsh-bin")
     run.add_argument("--dsh-home", type=Path)
-    run.add_argument("--state-dir", type=Path, default=default_state_root())
+    run.add_argument("--state-dir", type=Path)
     run.add_argument("--keep-session", action="store_true")
     run.add_argument("--quiet", action="store_true")
     run.add_argument("--heartbeat-seconds", type=_positive_float, default=10.0)
@@ -217,7 +229,8 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.set_defaults(func=cmd_doctor)
     show = commands.add_parser("show")
     show.add_argument("--run-id")
-    show.add_argument("--state-dir", type=Path, default=default_state_root())
+    show.add_argument("--workspace", type=Path)
+    show.add_argument("--state-dir", type=Path)
     show.set_defaults(func=cmd_show)
     return parser
 

@@ -5,7 +5,7 @@ from .models import AgentKind, ExecutionPlan, Verdict
 from .progress import RunEvent
 from .sdk import Conductor, ConductorConfig, ConductorError, TaskResult
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 __all__ = [
     "AgentKind",

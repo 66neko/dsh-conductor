@@ -6,9 +6,9 @@ on:
   workflow_dispatch:
     inputs:
       git_ref:
-        description: 要构建并发布的版本标签，例如 v0.3.0
+        description: 要构建并发布的版本标签，例如 v0.3.1
         required: true
-        default: v0.3.0
+        default: v0.3.1
         type: string
 
 permissions:

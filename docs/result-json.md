@@ -40,7 +40,7 @@ python3.13 -m conductor run \
   "run_id": "20260914T071530.123456Z-a1b2c3d4e5f6",
   "status": "accepted",
   "workspace": "/home/user/projects/demo",
-  "state_directory": "/home/user/.local/state/dsh-conductor/runs/20260914T071530.123456Z-a1b2c3d4e5f6",
+  "state_directory": "/home/user/projects/demo/.dsh-conductor/runs/20260914T071530.123456Z-a1b2c3d4e5f6",
   "session": "dsh-codex-a1b2c3d4e5f6",
   "plan": {
     "schema_version": 1,
@@ -97,7 +97,7 @@ python3.13 -m conductor run \
     "event_count": 19,
     "final_text": "任务已执行并完成独立验收。"
   },
-  "worker_log": "/home/user/.local/state/dsh-conductor/runs/20260914T071530.123456Z-a1b2c3d4e5f6/worker-screen.log"
+  "worker_log": "/home/user/projects/demo/.dsh-conductor/runs/20260914T071530.123456Z-a1b2c3d4e5f6/worker-screen.log"
 }
 ```
 
@@ -240,7 +240,7 @@ CLI 会捕获这类异常，并在 stdout 输出如下 JSON：
   "status": "error",
   "error": "DSH failed: DSH turn timed out",
   "run_id": "20260914T071530.123456Z-a1b2c3d4e5f6",
-  "state_directory": "/home/user/.local/state/dsh-conductor/runs/20260914T071530.123456Z-a1b2c3d4e5f6"
+  "state_directory": "/home/user/projects/demo/.dsh-conductor/runs/20260914T071530.123456Z-a1b2c3d4e5f6"
 }
 ```
 

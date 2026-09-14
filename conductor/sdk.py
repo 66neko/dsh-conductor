@@ -52,7 +52,7 @@ class ConductorConfig:
 
     dsh_bin: str | None = None
     dsh_home: Path | None = None
-    state_dir: Path = field(default_factory=default_state_root)
+    state_dir: Path | None = None
     provider: str = "deepseek-official"
     model: str = "deepseek-flash"
     max_attempts: int = 2
@@ -159,12 +159,13 @@ class Conductor:
 
         config = self.config
         home = dsh_home(config.dsh_home)
+        state_root = config.state_dir or default_state_root(self.workspace)
         try:
             # 直接覆盖项目级目录，确保 DSH 使用当前 SDK 随包的两个 skill。
             skill_root = prepare_workspace_skills(self.workspace)
             skill_scripts, available_agents = available_workspace_agent_skills(self.workspace)
             state = RunState.create(
-                state_root=config.state_dir,
+                state_root=state_root,
                 workspace=self.workspace,
                 prompt=prompt,
                 available_agents=available_agents,

@@ -1,4 +1,4 @@
-"""存放在委派工作区之外的单次运行状态。"""
+"""存放在委派工作区中的单次运行状态。"""
 
 from __future__ import annotations
 
@@ -12,10 +12,9 @@ from pathlib import Path
 from .models import AgentKind, JsonObject
 
 
-def default_state_root() -> Path:
-    configured = os.environ.get("XDG_STATE_HOME")
-    base = Path(configured).expanduser() if configured else Path.home() / ".local" / "state"
-    return base / "dsh-conductor"
+def default_state_root(workspace: Path) -> Path:
+    """返回工作区内默认的运行记录根目录。"""
+    return workspace.expanduser().resolve() / ".dsh-conductor"
 
 
 def atomic_write_json(path: Path, value: object) -> None:

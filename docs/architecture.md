@@ -40,7 +40,7 @@ attempts/<agent>/<n>/
   receipt.json
 ```
 
-计划和 verdict 通过临时文件加 `os.replace` 原子写入。receipt token、路径和 attempt 都由 SDK 预先生成。状态目录位于工作区之外，避免 worker 的清理命令删除协议文件。
+计划和 verdict 通过临时文件加 `os.replace` 原子写入。receipt token、路径和 attempt 都由 SDK 预先生成。状态目录默认位于工作区的 `.dsh-conductor/` 下；调用方可通过配置指定其他位置。
 
 ## 完成与验收事实
 

@@ -52,8 +52,6 @@ class CliTests(unittest.TestCase):
                         str(fixture),
                         "--dsh-home",
                         str(home),
-                        "--state-dir",
-                        str(root / "state"),
                         "--no-worker-log",
                     ]
                 )
@@ -61,7 +59,18 @@ class CliTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(output["status"], "accepted")
             self.assertEqual(output["plan"]["agent"], "claude")
+            self.assertEqual(
+                output["state_directory"].split("/runs/")[0],
+                str(workspace / ".dsh-conductor"),
+            )
             self.assertIn("conductor run", stderr.getvalue())
+
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                code = main(["show", "--workspace", str(workspace)])
+            shown = json.loads(stdout.getvalue())
+            self.assertEqual(code, 0)
+            self.assertEqual(shown["run_directory"], output["state_directory"])
 
 
 if __name__ == "__main__":

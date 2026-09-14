@@ -61,16 +61,17 @@ python3.13 -m conductor run \
 
 `run` 的 stdout 始终只有一个 JSON 对象；实时事件由 CLI 写入 stderr，因此可以安全地重定向 stdout。每次运行启动 DSH 前，SDK 都会把包内两个 skill 直接覆盖到 `<workspace>/.dsh/skills/`，供 DSH 项目级发现；不会写入 `~/.dsh/skills`，任务结束后也不会删除。`install-skills --workspace` 可提前执行同样的复制操作。`show` 可读取最近一次运行的 request、用户 prompt、manager prompt、plan、verdict 和日志路径。
 
-`.dsh/skills/` 是 SDK 生成的运行目录，建议加入项目的 Git 忽略规则。
+`.dsh/skills/` 和 `.dsh-conductor/` 都是 SDK 生成的运行目录，建议加入项目的 Git 忽略规则。
 
 ## 日志与状态
 
 conductor 会同时轮询两个候选 tmux 会话；DSH 选择哪个 agent 后，只有实际存在的会话产生屏幕日志。默认每 5 秒采样一次，SDK 可通过 `ConductorConfig(worker_log_interval_seconds=...)` 调整，CLI 可通过 `--worker-log-interval-seconds` 调整。变化会通过 `RunEvent(source="claude"/"codex", kind="worker_output")` 回调，并追加到 `worker-screen.log`。屏幕文字不会被当作完成或验收信号。
 
-状态目录默认是 `$XDG_STATE_HOME/dsh-conductor`，未设置时为 `~/.local/state/dsh-conductor`：
+状态目录默认位于当前 `workspace` 下的 `.dsh-conductor/`；可通过
+`ConductorConfig(state_dir=...)` 或 CLI 的 `--state-dir` 指定其他位置：
 
 ```text
-runs/<run-id>/
+<workspace>/.dsh-conductor/runs/<run-id>/
 ├── request.json
 ├── user-prompt.md
 ├── manager-prompt.md
