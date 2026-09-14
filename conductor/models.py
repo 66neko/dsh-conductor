@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -54,6 +55,15 @@ def _integer(record: JsonObject, key: str, *, minimum: int = 0) -> int:
     return value
 
 
+def _string_list(record: JsonObject, key: str, *, non_empty: bool = False) -> tuple[str, ...]:
+    value = record.get(key)
+    if not isinstance(value, list) or not all(isinstance(item, str) and item.strip() for item in value):
+        raise RecordError(f"{key} must be a list of non-empty strings")
+    if non_empty and not value:
+        raise RecordError(f"{key} must not be empty")
+    return tuple(value)
+
+
 def read_json_object(path: Path) -> JsonObject:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -65,7 +75,77 @@ def read_json_object(path: Path) -> JsonObject:
 
 
 @dataclass(frozen=True, slots=True)
+class AcceptanceCriterion:
+    id: str
+    description: str
+
+    @classmethod
+    def from_json(cls, value: object) -> "AcceptanceCriterion":
+        record = _object(value, "acceptance criterion")
+        criterion_id = _string(record, "id")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", criterion_id):
+            raise RecordError("criterion id has an unsupported format")
+        return cls(id=criterion_id, description=_string(record, "description"))
+
+    def to_json(self) -> JsonObject:
+        return {"id": self.id, "description": self.description}
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionPlan:
+    schema_version: int
+    run_id: str
+    agent: AgentKind
+    agent_reason: str
+    task_summary: str
+    implementation_steps: tuple[str, ...]
+    acceptance_criteria: tuple[AcceptanceCriterion, ...]
+
+    @classmethod
+    def load(cls, path: Path, *, expected_run_id: str) -> "ExecutionPlan":
+        record = read_json_object(path)
+        version = _integer(record, "schema_version", minimum=1)
+        if version != 1:
+            raise RecordError(f"unsupported plan schema_version: {version}")
+        run_id = _string(record, "run_id")
+        if run_id != expected_run_id:
+            raise RecordError(f"plan run_id {run_id!r} does not match this run")
+        try:
+            agent = AgentKind(_string(record, "agent"))
+        except ValueError as exc:
+            raise RecordError("plan.agent is not supported") from exc
+        raw_criteria = record.get("acceptance_criteria")
+        if not isinstance(raw_criteria, list) or not raw_criteria:
+            raise RecordError("acceptance_criteria must be a non-empty list")
+        criteria = tuple(AcceptanceCriterion.from_json(item) for item in raw_criteria)
+        ids = [criterion.id for criterion in criteria]
+        if len(ids) != len(set(ids)):
+            raise RecordError("acceptance criterion ids must be unique")
+        return cls(
+            schema_version=version,
+            run_id=run_id,
+            agent=agent,
+            agent_reason=_string(record, "agent_reason"),
+            task_summary=_string(record, "task_summary"),
+            implementation_steps=_string_list(record, "implementation_steps", non_empty=True),
+            acceptance_criteria=criteria,
+        )
+
+    def to_json(self) -> JsonObject:
+        return {
+            "schema_version": self.schema_version,
+            "run_id": self.run_id,
+            "agent": self.agent.value,
+            "agent_reason": self.agent_reason,
+            "task_summary": self.task_summary,
+            "implementation_steps": list(self.implementation_steps),
+            "acceptance_criteria": [item.to_json() for item in self.acceptance_criteria],
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class VerificationCheck:
+    criterion_id: str
     criterion: str
     method: str
     evidence: str
@@ -78,6 +158,7 @@ class VerificationCheck:
         if not isinstance(passed, bool):
             raise RecordError("check.passed must be a boolean")
         return cls(
+            criterion_id=_string(record, "criterion_id"),
             criterion=_string(record, "criterion"),
             method=_string(record, "method"),
             evidence=_string(record, "evidence"),
@@ -86,6 +167,7 @@ class VerificationCheck:
 
     def to_json(self) -> JsonObject:
         return {
+            "criterion_id": self.criterion_id,
             "criterion": self.criterion,
             "method": self.method,
             "evidence": self.evidence,
@@ -110,34 +192,35 @@ class Verdict:
         cls,
         path: Path,
         *,
-        expected_run_id: str,
-        expected_agent: AgentKind,
+        plan: ExecutionPlan,
         max_attempts: int,
         workspace: Path,
         expected_receipts: Sequence[tuple[Path, str]],
     ) -> "Verdict":
         record = read_json_object(path)
         version = _integer(record, "schema_version", minimum=1)
-        if version != 1:
+        if version != 2:
             raise RecordError(f"unsupported verdict schema_version: {version}")
         run_id = _string(record, "run_id")
-        if run_id != expected_run_id:
-            raise RecordError(f"verdict run_id {run_id!r} does not match this run")
+        if run_id != plan.run_id:
+            raise RecordError(f"verdict run_id {run_id!r} does not match the plan")
         try:
             agent = AgentKind(_string(record, "agent"))
         except ValueError as exc:
             raise RecordError("verdict.agent is not supported") from exc
-        if agent is not expected_agent:
-            raise RecordError(f"verdict agent {agent.value!r} does not match this run")
+        if agent is not plan.agent:
+            raise RecordError(f"verdict agent {agent.value!r} does not match the plan")
         status = _string(record, "status")
         if status not in {"accepted", "rejected"}:
             raise RecordError("verdict.status must be accepted or rejected")
-        attempts = _integer(record, "attempts", minimum=1)
+        attempts = _integer(record, "attempts", minimum=0)
         if attempts > max_attempts:
             raise RecordError("verdict.attempts exceeds max_attempts")
+        if status == "accepted" and attempts == 0:
+            raise RecordError("accepted verdict requires at least one worker attempt")
 
         raw_artifacts = record.get("artifacts")
-        if not isinstance(raw_artifacts, list) or not all(isinstance(x, str) for x in raw_artifacts):
+        if not isinstance(raw_artifacts, list) or not all(isinstance(item, str) for item in raw_artifacts):
             raise RecordError("verdict.artifacts must be a list of strings")
         artifacts: list[str] = []
         root = workspace.resolve()
@@ -156,22 +239,28 @@ class Verdict:
         if not isinstance(raw_checks, list):
             raise RecordError("verdict.checks must be a list")
         checks = tuple(VerificationCheck.from_json(item) for item in raw_checks)
-        if status == "accepted" and (not checks or not all(check.passed for check in checks)):
-            raise RecordError("accepted verdict requires at least one check and all checks must pass")
+        planned_ids = {criterion.id for criterion in plan.acceptance_criteria}
+        check_ids = [check.criterion_id for check in checks]
+        if len(check_ids) != len(set(check_ids)):
+            raise RecordError("verdict criterion ids must be unique")
+        if set(check_ids) != planned_ids:
+            raise RecordError("verdict checks must cover every planned acceptance criterion exactly once")
+        if status == "accepted" and not all(check.passed for check in checks):
+            raise RecordError("accepted verdict requires all checks to pass")
 
-        raw_issues = record.get("remaining_issues")
-        if not isinstance(raw_issues, list) or not all(isinstance(x, str) for x in raw_issues):
-            raise RecordError("verdict.remaining_issues must be a list of strings")
-        if status == "accepted" and raw_issues:
+        issues = _string_list(record, "remaining_issues")
+        if status == "accepted" and issues:
             raise RecordError("accepted verdict cannot contain remaining issues")
+        if status == "rejected" and not issues:
+            raise RecordError("rejected verdict requires at least one remaining issue")
 
         if status == "accepted":
-            # accepted 必须能追溯到本轮每一次真实交接，不能只相信 verdict 自报的轮次。
+            # accepted 必须能追溯到所选 agent 的每一次真实交接。
             if len(expected_receipts) < attempts:
                 raise RecordError("accepted verdict has no receipt definition for every attempt")
             receipts = [
-                WorkerReceipt.load(path, expected_token=token)
-                for path, token in expected_receipts[:attempts]
+                WorkerReceipt.load(receipt_path, expected_token=token)
+                for receipt_path, token in expected_receipts[:attempts]
             ]
             if receipts[-1].status != "ready_for_verification":
                 raise RecordError("accepted verdict requires a ready_for_verification final receipt")
@@ -185,7 +274,7 @@ class Verdict:
             artifacts=tuple(artifacts),
             checks=checks,
             summary=_string(record, "summary"),
-            remaining_issues=tuple(raw_issues),
+            remaining_issues=issues,
         )
 
     def to_json(self) -> JsonObject:

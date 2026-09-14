@@ -43,6 +43,21 @@ class DshClientTests(unittest.TestCase):
         self.assertIn("code 17", message)
         self.assertIn("fixture startup failure", message)
 
+    def test_permission_mode_cannot_be_overridden_by_extra_environment(self) -> None:
+        fixture = Path(__file__).parent / "fixtures" / "fake_dsh.py"
+        with tempfile.TemporaryDirectory() as directory:
+            config = DshConfig(
+                workspace=Path(directory),
+                dsh_bin=str(fixture),
+                extra_env={
+                    "FAKE_DSH_CHECK_PERMISSION": "1",
+                    "DSH_PERMISSION_MODE": "sandbox",
+                },
+            )
+            with DshClient(config) as client:
+                result = client.run("test", session_id="fixture", timeout_seconds=2)
+        self.assertEqual(result.status, "completed")
+
 
 if __name__ == "__main__":
     unittest.main()

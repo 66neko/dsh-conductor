@@ -67,29 +67,26 @@ def _emit(value: object) -> None:
     sys.stdout.flush()
 
 
-def _completion_prompt(*, script: Path, receipt: Path, token: str) -> str:
-    # worker 的自然语言回复不参与完成判断，最后一个工具动作必须写入 token 回执。
+def _submission_prompt(*, task_file: Path, script: Path, receipt: Path, token: str) -> str:
+    # TUI 只接收短指令；任务正文留在文件中，避免长粘贴在交互式编辑器中被截断。
     command = (
         f"python3.13 {shlex.quote(str(script))} complete "
         f"--receipt {shlex.quote(str(receipt))} --token {shlex.quote(token)} "
-        "--status ready_for_verification --summary 'brief factual summary'"
+        "--status ready_for_verification --summary '简短事实总结'"
     )
     blocked = command.replace("ready_for_verification", "blocked")
     return f"""
-
 <dsh_conductor_handoff>
-Complete the requested work autonomously. Do not treat this handoff as an acceptance test.
-As your final tool action, after all edits and checks are finished, run this command with the
-summary placeholder replaced by a short factual summary:
+请完整读取任务文件 `{task_file}`，自主完成其中的任务和自检。该文件不是验收结论。
+全部编辑与检查结束后，最后一个工具操作必须运行下列命令，并把 summary 占位文字改为简短事实总结：
 
 {command}
 
-If an external blocker prevents completion, use this form instead and describe the blocker:
+如果外部阻塞导致无法完成，改用下列命令，并在 summary 中说明阻塞原因：
 
 {blocked}
 
-Do not perform more work after writing the receipt. The receipt only tells the independent DSH
-manager that your turn is ready for verification; it does not claim that the work was accepted.
+写入回执后不要继续工作。回执只表示可以交给 DSH 独立验收，不表示任务已经通过验收。
 </dsh_conductor_handoff>
 """.strip()
 
@@ -99,15 +96,18 @@ def wait_until_ready(
     adapter: AgentAdapter,
     *,
     timeout_seconds: float,
+    ready_settle_seconds: float = 2.0,
 ) -> None:
     deadline = time.monotonic() + timeout_seconds
     menu_steps = 0
+    ready_since: float | None = None
     while time.monotonic() < deadline:
         screen = session.capture()
         status = session.status()
         if status.pane_dead:
             raise WorkerError(f"{adapter.kind} exited during startup\n{screen[-2000:]}")
         if adapter.is_menu(screen):
+            ready_since = None
             label = adapter.cursor_label(screen)
             if label and adapter.affirmative.search(label):
                 session.send_keys("Enter")
@@ -122,7 +122,13 @@ def wait_until_ready(
             time.sleep(0.75)
             continue
         if adapter.is_ready(screen):
-            return
+            # 启动界面可能先显示输入框，随后才弹出目录信任菜单；稳定后再粘贴任务。
+            if ready_since is None:
+                ready_since = time.monotonic()
+            elif time.monotonic() - ready_since >= ready_settle_seconds:
+                return
+        else:
+            ready_since = None
         time.sleep(0.5)
     raise WorkerError(f"{adapter.kind} did not become ready\n{session.capture()[-2000:]}")
 
@@ -134,6 +140,7 @@ def wait_for_receipt(
     receipt_file: Path,
     token: str,
     timeout_seconds: float,
+    submission: str,
 ) -> tuple[WorkerReceipt, float]:
     started = time.monotonic()
     deadline = started + timeout_seconds
@@ -164,8 +171,10 @@ def wait_for_receipt(
             time.sleep(0.75)
             continue
         if resubmit_after_menu and adapter.is_ready(screen):
-            # 原本用于提交 prompt 的 Enter 可能被首次使用菜单消费；菜单关闭后补交一次。
-            session.send_keys("Enter")
+            # 菜单可能截断首次粘贴；清空残留输入后完整重投，不能只补发 Enter。
+            session.send_keys("C-c")
+            time.sleep(0.25)
+            session.send_text(submission)
             resubmit_after_menu = False
             last_submit = time.monotonic()
             time.sleep(0.5)
@@ -200,19 +209,27 @@ def submit(
         task = task_file.read_text(encoding="utf-8")
     except OSError as exc:
         raise WorkerError(f"cannot read task file {task_file}: {exc}") from exc
+    if not task.strip():
+        raise WorkerError(f"task file is empty: {task_file}")
     receipt_file.parent.mkdir(parents=True, exist_ok=True)
-    prompt = task.rstrip() + "\n\n" + _completion_prompt(
+    prompt = _submission_prompt(
+        task_file=task_file.resolve(),
         script=script,
         receipt=receipt_file.resolve(),
         token=token,
     )
     session.send_text(prompt)
+    # 长文本粘贴可能在首个 Enter 后才完成展开；菜单由后续分支处理，其余状态只补交一次。
+    time.sleep(2.0)
+    if not receipt_file.exists() and not adapter.is_menu(session.capture()):
+        session.send_keys("Enter")
     receipt, elapsed = wait_for_receipt(
         session,
         adapter=adapter,
         receipt_file=receipt_file,
         token=token,
         timeout_seconds=timeout_seconds,
+        submission=prompt,
     )
     return {
         "schema_version": 1,

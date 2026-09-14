@@ -1,0 +1,62 @@
+from __future__ import annotations
+
+import io
+import json
+import tempfile
+import unittest
+from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
+from unittest import mock
+
+from conductor.cli import main
+from conductor.models import AgentKind
+from conductor.skills import source_skill
+
+
+class CliTests(unittest.TestCase):
+    def test_run_keeps_stdout_as_one_json_object(self) -> None:
+        fixture = Path(__file__).parent / "fixtures" / "fake_dsh.py"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            home = root / "dsh-home"
+            (home / "skills").mkdir(parents=True)
+            for kind in AgentKind:
+                (home / "skills" / kind.skill_name).symlink_to(
+                    source_skill(kind),
+                    target_is_directory=True,
+                )
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                mock.patch.dict("os.environ", {"FAKE_DSH_SDK": "1"}),
+                mock.patch("conductor.skills.shutil.which", return_value="/bin/true"),
+                redirect_stdout(stdout),
+                redirect_stderr(stderr),
+            ):
+                code = main(
+                    [
+                        "run",
+                        "--workspace",
+                        str(workspace),
+                        "--prompt",
+                        "创建 fixture.txt。验收标准：文件存在。",
+                        "--dsh-bin",
+                        str(fixture),
+                        "--dsh-home",
+                        str(home),
+                        "--state-dir",
+                        str(root / "state"),
+                        "--no-worker-log",
+                    ]
+                )
+            output = json.loads(stdout.getvalue())
+            self.assertEqual(code, 0)
+            self.assertEqual(output["status"], "accepted")
+            self.assertEqual(output["plan"]["agent"], "claude")
+            self.assertIn("conductor run", stderr.getvalue())
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -9,7 +9,7 @@ from conductor.state import RunState
 
 
 class RunStateTests(unittest.TestCase):
-    def test_each_run_and_attempt_has_unique_fact_paths(self) -> None:
+    def test_run_prepares_isolated_candidates_for_both_agents(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             workspace = root / "workspace"
@@ -17,19 +17,28 @@ class RunStateTests(unittest.TestCase):
             state = RunState.create(
                 state_root=root / "state",
                 workspace=workspace,
-                agent=AgentKind.CODEX,
-                task="implement it",
-                acceptance="tests pass",
+                prompt="实现任务。验收标准：测试通过。",
+                available_agents={AgentKind.CODEX},
                 max_attempts=2,
                 attempt_timeout_seconds=30,
                 keep_session=False,
             )
             request = read_json_object(state.request_file)
+            self.assertEqual(request["schema_version"], 2)
             self.assertEqual(request["run_id"], state.run_id)
-            self.assertEqual(request["agent"], "codex")
-            self.assertEqual(len(state.attempts), 2)
-            self.assertNotEqual(state.attempts[0].token, state.attempts[1].token)
-            self.assertNotEqual(state.attempts[0].receipt_file, state.attempts[1].receipt_file)
+            self.assertEqual(request["available_agents"], ["codex"])
+            self.assertEqual(state.user_prompt_file.read_text(encoding="utf-8"), "实现任务。验收标准：测试通过。\n")
+            self.assertEqual({agent.kind for agent in state.agents}, set(AgentKind))
+            for kind in AgentKind:
+                attempts = state.agent_state(kind).attempts
+                self.assertEqual(len(attempts), 2)
+                self.assertNotEqual(attempts[0].token, attempts[1].token)
+                self.assertNotEqual(attempts[0].receipt_file, attempts[1].receipt_file)
+            self.assertNotEqual(
+                state.agent_state(AgentKind.CLAUDE).session,
+                state.agent_state(AgentKind.CODEX).session,
+            )
+            self.assertFalse(state.plan_file.exists())
             self.assertFalse(state.verdict_file.exists())
 
 

@@ -213,10 +213,11 @@ class DshClient:
         if self._process is not None:
             return self
         environment = os.environ.copy()
+        environment.update(self.config.extra_env)
+        # 这是 DSH 执行 skill 和验收命令的必要条件，调用方不能通过 extra_env 覆盖。
         environment["DSH_PERMISSION_MODE"] = "danger-full-access"
         if self.config.dsh_home is not None:
             environment["DSH_HOME"] = str(self.config.dsh_home.expanduser().resolve())
-        environment.update(self.config.extra_env)
         try:
             self._process = subprocess.Popen(
                 self._command(),
