@@ -4,8 +4,7 @@ from .dsh import DshClient, DshConfig, DshError, RunResult
 from .models import AgentKind, ExecutionPlan, Verdict
 from .progress import RunEvent
 from .sdk import Conductor, ConductorConfig, ConductorError, TaskResult
-
-__version__ = "0.3.1"
+from ._version import __version__
 
 __all__ = [
     "AgentKind",

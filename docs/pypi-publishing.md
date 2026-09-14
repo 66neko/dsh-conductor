@@ -26,12 +26,13 @@ wheel 与 sdist。发布不需要在 GitHub Secrets 中保存 PyPI API token。
 
 ## 发布流程
 
-项目版本由 `pyproject.toml` 中的 `[project].version` 定义。版本 `0.3.1` 应创建名为
-`v0.3.1` 的 Git tag，并基于该 tag 创建 GitHub Release：
+项目版本唯一由 `conductor/_version.py` 中的 `__version__` 定义。创建与该版本匹配的 Git
+tag，并基于该 tag 创建 GitHub Release：
 
 ```bash
-git tag v0.3.1
-git push origin v0.3.1
+VERSION=$(python3.13 -c 'from conductor._version import __version__; print(__version__)')
+git tag "v$VERSION"
+git push origin "v$VERSION"
 ```
 
 然后在 GitHub 上发布对应的 Release。`publish.yml` 会检查 Release tag 必须严格等于
@@ -39,7 +40,7 @@ git push origin v0.3.1
 Trusted Publishing job 上传。
 
 也可以在 Actions 页面手动运行 `Publish to PyPI`，填写已经推送的版本标签，例如
-`v0.3.1`。手动运行同一版本会被 PyPI 拒绝，这是预期行为；每个版本只能发布一次。工作流
+`v<project-version>`。手动运行同一版本会被 PyPI 拒绝，这是预期行为；每个版本只能发布一次。工作流
 不会接受分支名或普通提交作为发布来源。
 
 ## 发布前本地检查

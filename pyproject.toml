@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dsh-conductor"
-version = "0.3.1"
+dynamic = ["version"]
 description = "DSH-managed coding-agent delegation with independent verification"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -33,6 +33,9 @@ conductor = "conductor.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["conductor*"]
+
+[tool.setuptools.dynamic]
+version = {attr = "conductor._version.__version__"}
 
 [tool.setuptools.data-files]
 "share/dsh-conductor/skills/tmux-claude-code" = ["skills/tmux-claude-code/SKILL.md"]
