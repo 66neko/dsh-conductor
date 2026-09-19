@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
-import fcntl
-import math
-from dataclasses import dataclass, field
+import shlex
+import shutil
+import threading
+import time
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from .dsh import DshClient, DshConfig, DshError, RunResult
-from .models import ExecutionPlan, JsonObject, RecordError, Verdict, read_json_object
+from .errors import ConductorError, OperationError
+from .lifecycle import RunContext, acquire_lock, positive_seconds
+from .runtime import CleanupReport, RunResources, cleanup_resources
+from .dsh import DshClient, DshConfig, RunResult
+from .models import ExecutionPlan, JsonObject, RecordError, Verdict
 from .progress import EventCallback, ProgressReporter
 from .prompt import build_prompt
 from .skills import (
@@ -17,35 +22,8 @@ from .skills import (
     prepare_workspace_skills,
 )
 from .state import RunState, atomic_write_json, default_state_root
-from .tmux import HISTORY_LIMIT, TmuxError, TmuxSession
+from .tmux import HISTORY_LIMIT, TmuxSession
 from .worker_log import DEFAULT_WORKER_LOG_INTERVAL_SECONDS, WorkerLogFollower
-
-
-class ConductorError(RuntimeError):
-    """任务未能产生可信的结构化结果。"""
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        run_id: str | None = None,
-        state_directory: Path | None = None,
-    ) -> None:
-        super().__init__(message)
-        self.run_id = run_id
-        self.state_directory = state_directory
-
-    def to_json(self) -> JsonObject:
-        value: JsonObject = {
-            "schema_version": 1,
-            "status": "error",
-            "error": str(self),
-        }
-        if self.run_id is not None:
-            value["run_id"] = self.run_id
-        if self.state_directory is not None:
-            value["state_directory"] = str(self.state_directory)
-        return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +40,7 @@ class ConductorConfig:
     max_recovery_attempts: int = 5
     sdk_heartbeat_counts_as_activity: bool = True
     timeout_seconds: float = 3600.0
+    cleanup_timeout_seconds: float = 5.0
     keep_session: bool = False
     heartbeat_seconds: float = 10.0
     worker_log: bool = True
@@ -76,6 +55,7 @@ class ConductorConfig:
             "max_recovery_attempts": self.max_recovery_attempts,
             "worker_idle_timeout_seconds": self.worker_idle_timeout_seconds,
             "timeout_seconds": self.timeout_seconds,
+            "cleanup_timeout_seconds": self.cleanup_timeout_seconds,
             "heartbeat_seconds": self.heartbeat_seconds,
             "worker_log_interval_seconds": self.worker_log_interval_seconds,
             "dsh_init_timeout_seconds": self.dsh_init_timeout_seconds,
@@ -90,8 +70,26 @@ class ConductorConfig:
         if isinstance(self.max_recovery_attempts, bool) or not isinstance(self.max_recovery_attempts, int) or not 1 <= self.max_recovery_attempts <= 5:
             raise ValueError("max_recovery_attempts must be an integer from 1 to 5")
         for name, value in numeric.items():
-            if not math.isfinite(value) or value <= 0:
-                raise ValueError(f"{name} must be greater than zero")
+            positive_seconds(value, name)
+        for name in ("keep_session", "worker_log"):
+            if not isinstance(getattr(self, name), bool):
+                raise ValueError(f"{name} must be a boolean")
+        for name in ("provider", "model"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{name} must be a non-empty string")
+        if not isinstance(self.dsh_extra_env, dict) or not all(isinstance(k, str) and isinstance(v, str)
+                                                            for k, v in self.dsh_extra_env.items()):
+            raise ValueError("dsh_extra_env must map strings to strings")
+        if any(not k or "=" in k or "\0" in k or "\0" in v for k, v in self.dsh_extra_env.items()):
+            raise ValueError("dsh_extra_env contains an invalid environment entry")
+        for name in ("state_dir", "dsh_home"):
+            value = getattr(self, name)
+            if value is not None:
+                if not isinstance(value, (str, Path)):
+                    raise ValueError(f"{name} must be a path")
+                object.__setattr__(self, name, Path(value))
+        object.__setattr__(self, "dsh_extra_env", dict(self.dsh_extra_env))
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,6 +130,13 @@ class TaskResult:
     dsh: DshRunSummary
     worker_log: Path | None = None
     worker_result: Path | None = None
+    cleanup: CleanupReport = field(default_factory=CleanupReport)
+    tmux_socket: Path | None = None
+
+    @property
+    def attach_command(self) -> str:
+        return shlex.join(["tmux", *(["-S", str(self.tmux_socket)] if self.tmux_socket else []),
+                           "attach", "-t", self.session])
 
     @property
     def accepted(self) -> bool:
@@ -148,7 +153,11 @@ class TaskResult:
             "plan": self.plan.to_json(),
             "verdict": self.verdict.to_json(),
             "dsh": self.dsh.to_json(),
+            "cleanup": self.cleanup.to_json(),
+            "attach_command": self.attach_command,
         }
+        if self.tmux_socket is not None:
+            value["tmux_socket"] = str(self.tmux_socket)
         if self.worker_log is not None:
             value["worker_log"] = str(self.worker_log)
         if self.worker_result is not None:
@@ -160,208 +169,220 @@ class Conductor:
     """让 DSH 拆解、监督并验收一个自然语言编码任务。"""
 
     def __init__(self, workspace: str | Path, config: ConductorConfig | None = None) -> None:
-        self.workspace = Path(workspace).expanduser().resolve()
+        try:
+            self.workspace = Path(workspace).expanduser().resolve()
+        except (TypeError, ValueError, OSError) as exc:
+            raise ConductorError(str(exc), code="invalid_input", phase="validation") from exc
         self.config = config or ConductorConfig()
 
-    def run(self, prompt: str, on_event: EventCallback | None = None) -> TaskResult:
-        if not self.workspace.is_dir():
-            raise ConductorError(f"workspace is not a directory: {self.workspace}")
-        if not isinstance(prompt, str) or not prompt.strip():
-            raise ConductorError("prompt must not be empty")
-
+    def run(self, prompt: str, on_event: EventCallback | None = None, *,
+            cancel_event: threading.Event | None = None) -> TaskResult:
         config = self.config
-        home = dsh_home(config.dsh_home)
-        state_root = config.state_dir or default_state_root(self.workspace)
+        context = RunContext(config.timeout_seconds, config.cleanup_timeout_seconds, cancel_event)
+        state: RunState | None = None
+        resources: RunResources | None = None
+        client: DshClient | None = None
+        reporter: ProgressReporter | None = None
+        followers: list[WorkerLogFollower] = []
+        workspace_lock = None
+        result: TaskResult | None = None
+        validation_object = "plan"
+        cleanup = CleanupReport()
+        diagnostics: list[str] = []
         try:
-            # 直接覆盖项目级目录，确保 DSH 使用当前 SDK 随包的两个 skill。
-            skill_root = prepare_workspace_skills(self.workspace)
+            if cancel_event is not None and not isinstance(cancel_event, threading.Event):
+                raise ConductorError("cancel_event must be a threading.Event", code="invalid_input", phase="validation")
+            context.budget().check()
+            if not self.workspace.is_dir():
+                raise ConductorError(f"workspace is not a directory: {self.workspace}", code="invalid_input", phase="validation")
+            if not isinstance(prompt, str) or not prompt.strip():
+                raise ConductorError("prompt must not be empty", code="invalid_input", phase="validation")
+            if on_event is not None and not callable(on_event):
+                raise ConductorError("on_event must be callable", code="invalid_input", phase="validation")
+            budget = context.budget("preparation")
+            if shutil.which("tmux") is None:
+                raise OperationError("cannot find tmux on PATH", code="dependency_missing", phase="preparation")
+            # 与自定义 state_dir 无关，同一工作区始终共用一把锁。
+            lock_root = default_state_root(self.workspace)
+            lock_root.mkdir(parents=True, exist_ok=True)
+            workspace_lock = (lock_root / "workspace.lock").open("a")
+            acquire_lock(workspace_lock, budget, immediate=True)
+            skill_root = prepare_workspace_skills(self.workspace, budget=budget)
             skill_scripts, available_agents = available_workspace_agent_skills(self.workspace)
+
+            def created(run_id: str, root: Path) -> None:
+                context.run_id = run_id
+                context.state_directory = root
+
             state = RunState.create(
-                state_root=state_root,
-                workspace=self.workspace,
-                prompt=prompt,
-                available_agents=available_agents,
-                max_attempts=config.max_attempts,
+                state_root=config.state_dir or default_state_root(self.workspace), workspace=self.workspace,
+                prompt=prompt, available_agents=available_agents, max_attempts=config.max_attempts,
                 worker_idle_timeout_seconds=config.worker_idle_timeout_seconds,
                 max_recovery_attempts=config.max_recovery_attempts,
                 sdk_heartbeat_counts_as_activity=config.sdk_heartbeat_counts_as_activity,
-                keep_session=config.keep_session,
+                keep_session=config.keep_session, budget=budget, on_create=created,
             )
-        except (DshError, OSError) as exc:
-            raise ConductorError(str(exc)) from exc
-
-        try:
-            manager_prompt = build_prompt(
-                state,
-                skill_scripts=skill_scripts,
-                available_agents=available_agents,
-                max_attempts=config.max_attempts,
-                worker_idle_timeout_seconds=config.worker_idle_timeout_seconds,
-                keep_session=config.keep_session,
-                sdk_heartbeat_counts_as_activity=config.sdk_heartbeat_counts_as_activity,
-            )
+            budget = context.budget()
+            resources = RunResources(state, context)
+            manager_prompt = build_prompt(state, skill_scripts=skill_scripts, available_agents=available_agents,
+                                          max_attempts=config.max_attempts,
+                                          worker_idle_timeout_seconds=config.worker_idle_timeout_seconds,
+                                          keep_session=config.keep_session,
+                                          sdk_heartbeat_counts_as_activity=config.sdk_heartbeat_counts_as_activity)
             state.write_manager_prompt(manager_prompt)
-        except OSError as exc:
-            raise ConductorError(
-                f"cannot prepare manager prompt: {exc}",
-                run_id=state.run_id,
-                state_directory=state.root,
-            ) from exc
-
-        reporter = ProgressReporter(
-            on_event=on_event,
-            heartbeat_seconds=config.heartbeat_seconds,
-            heartbeat_file=state.root / "sdk-heartbeat.json" if config.sdk_heartbeat_counts_as_activity else None,
-            supervision_log=state.root / "supervision.jsonl",
-        ).start()
-        reporter.emit(source="conductor", kind="run_start", message=f"run {state.run_id}")
-        reporter.emit(source="conductor", kind="state", message=f"state {state.root}")
-
-        followers: list[WorkerLogFollower] = []
-        if config.worker_log:
-            # agent 尚未选择，因此同时监听两个唯一候选会话；不存在的会话不会产生事件。
-            for agent in state.agents:
-                followers.append(
-                    WorkerLogFollower(
-                        session_name=agent.session,
-                        agent=agent.kind.value,
-                        log_file=state.worker_log_file,
-                        sink=reporter.worker_lines,
-                        interval_seconds=config.worker_log_interval_seconds,
-                    ).start()
-                )
-
-        finalized = False
-        try:
-            run: RunResult | None = None
-            try:
-                dsh_config = DshConfig(
-                    workspace=self.workspace,
-                    dsh_bin=config.dsh_bin,
-                    provider=config.provider,
-                    model=config.model,
-                    dsh_home=home,
-                    skill_dir=skill_root,
-                    init_timeout_seconds=config.dsh_init_timeout_seconds,
-                    shutdown_timeout_seconds=config.dsh_shutdown_timeout_seconds,
-                    extra_env=dict(config.dsh_extra_env),
-                )
-                with DshClient(dsh_config) as client:
-                    run = client.run(
-                        manager_prompt,
-                        session_id=f"conductor-{state.run_id}",
-                        timeout_seconds=config.timeout_seconds,
-                        on_event=reporter,
-                    )
-            except DshError as exc:
-                raise ConductorError(
-                    f"DSH failed: {exc}",
-                    run_id=state.run_id,
-                    state_directory=state.root,
-                ) from exc
-            finally:
-                for follower in followers:
-                    follower.stop()
-
-            assert run is not None
-            if run.status != "completed":
-                message = f"DSH turn ended with status {run.status}"
-                if run.stderr_tail:
-                    message += f": {run.stderr_tail[-1200:]}"
-                raise ConductorError(
-                    message,
-                    run_id=state.run_id,
-                    state_directory=state.root,
-                )
-
-            try:
-                plan = ExecutionPlan.load(state.plan_file, expected_run_id=state.run_id)
-                selected = state.agent_state(plan.agent)
-                verdict = Verdict.load(
-                    state.verdict_file,
-                    plan=plan,
-                    max_attempts=config.max_attempts,
-                    workspace=self.workspace,
-                    expected_receipts=tuple(
-                        (attempt.receipt_file, attempt.token) for attempt in selected.attempts
-                    ),
-                )
-                if verdict.status == "accepted" and plan.agent not in available_agents:
-                    raise RecordError(
-                        f"accepted verdict selected unavailable agent {plan.agent.value!r}"
-                    )
-            except RecordError as exc:
-                raise ConductorError(
-                    f"invalid or missing DSH result: {exc}",
-                    run_id=state.run_id,
-                    state_directory=state.root,
-                ) from exc
-
-            # DSH 必须保留会话到 SDK 完成末次采样，避免 10 秒采样间隔吞掉结束前的输出。
-            # 失败必须停止 worker；日志和证据保留在运行目录。
-            if verdict.status == "rejected":
-                self._stop_workers(state, reporter, reason=verdict.summary)
-            elif not config.keep_session:
-                try:
-                    session = TmuxSession(selected.session)
-                    if session.exists():
-                        status = session.status()
-                        if status.agent != plan.agent.value or status.workspace != str(self.workspace):
-                            raise TmuxError("worker session metadata does not match this run")
-                        session.close()
-                except TmuxError as exc:
-                    reporter.emit(source="conductor", kind="cleanup_error", message=f"tmux cleanup: {exc}")
-
-            reporter.read_supervision()
-            reporter.emit(source="conductor", kind="run_end", message=f"verdict {verdict.status}")
-            finalized = True
-            worker_result = (
-                selected.attempts[verdict.attempts - 1].result_file
-                if verdict.attempts else None
-            )
-            return TaskResult(
-                run_id=state.run_id,
-                workspace=self.workspace,
-                state_directory=state.root,
-                session=selected.session,
-                plan=plan,
-                verdict=verdict,
-                dsh=DshRunSummary.from_run(run),
-                worker_log=state.worker_log_file if state.worker_log_file.exists() else None,
-                worker_result=worker_result if worker_result and worker_result.is_file() else None,
-            )
-        finally:
-            if not finalized:
-                self._stop_workers(state, reporter, reason="SDK/DSH 异常、超时或结果无效，结束 worker")
-            reporter.stop()
-
-    def _stop_workers(self, state: RunState, reporter: ProgressReporter, *, reason: str) -> None:
-        # 与控制器操作互斥，结束标记阻止尚未退出的 watch/recover 再次提交。
-        try:
-            with (state.root / "supervision.lock").open("a") as lock:
-                fcntl.flock(lock, fcntl.LOCK_EX)
-                atomic_write_json(state.root / "sdk-stop.json", {"run_id": state.run_id, "reason": reason})
+            budget.check()
+            reporter = ProgressReporter(on_event=on_event, heartbeat_seconds=config.heartbeat_seconds,
+                                        heartbeat_file=state.root / "sdk-heartbeat.json" if config.sdk_heartbeat_counts_as_activity else None,
+                                        supervision_log=state.root / "supervision.jsonl")
+            reporter.start()
+            reporter.emit(source="conductor", kind="run_start", message=f"run {state.run_id}")
+            reporter.emit(source="conductor", kind="state", message=f"state {state.root}")
+            if config.worker_log:
                 for agent in state.agents:
-                    try:
-                        session = TmuxSession(agent.session)
-                        if not session.exists():
-                            continue
-                        status = session.status()
-                        if status.agent != agent.kind.value or Path(status.workspace).resolve() != self.workspace:
-                            raise TmuxError("worker session metadata does not match this run")
-                        try:
-                            screen = session.capture(history_lines=HISTORY_LIMIT)
-                            (state.root / f"sdk-stop-{agent.kind.value}.txt").write_text(screen, encoding="utf-8")
-                        finally:
-                            session.close()
-                        reporter.emit(source="conductor", kind="supervision_stopped", message=f"{agent.kind.value}: {reason}")
-                    except (TmuxError, OSError) as exc:
-                        reporter.emit(source="conductor", kind="cleanup_error", message=f"tmux stop: {exc}")
-                path = state.root / "supervision.json"
-                if path.exists():
-                    supervision = read_json_object(path)
-                    if supervision.get("run_id") == state.run_id:
-                        supervision.update(phase="stopped", stop_reason=reason)
-                        atomic_write_json(path, supervision)
-        except (OSError, RecordError) as exc:
-            reporter.emit(source="conductor", kind="cleanup_error", message=f"worker stop: {exc}")
+                    follower = WorkerLogFollower(session_name=agent.session, agent=agent.kind.value,
+                                                 log_file=state.worker_log_file, sink=reporter.worker_lines,
+                                                 interval_seconds=config.worker_log_interval_seconds,
+                                                 socket_path=resources.socket, budget=budget)
+                    followers.append(follower)
+                    follower.start()
+            client = DshClient(DshConfig(
+                workspace=self.workspace, dsh_bin=config.dsh_bin, provider=config.provider, model=config.model,
+                dsh_home=dsh_home(config.dsh_home), skill_dir=skill_root,
+                init_timeout_seconds=config.dsh_init_timeout_seconds,
+                shutdown_timeout_seconds=config.dsh_shutdown_timeout_seconds,
+                extra_env=dict(config.dsh_extra_env), budget=context.budget("dsh_start"),
+            ))
+            run = client.run(manager_prompt, session_id=f"conductor-{state.run_id}",
+                             timeout_seconds=config.timeout_seconds, on_event=reporter)
+            if run.status != "completed":
+                raise OperationError(f"DSH turn ended with status {run.status}: {run.stderr_tail[-1200:]}",
+                                     code="timeout" if run.status == "timeout" else "dsh_execution_failed",
+                                     phase="dsh_run", details={"turn_end_reason": run.turn_end_reason})
+            budget = context.budget("result_validation")
+            budget.check()
+            plan = ExecutionPlan.load(state.plan_file, expected_run_id=state.run_id, budget=budget)
+            selected = state.agent_state(plan.agent)
+            validation_object = "verdict"
+            verdict = Verdict.load(state.verdict_file, plan=plan, max_attempts=config.max_attempts,
+                                   workspace=self.workspace, budget=budget,
+                                   expected_receipts=tuple((attempt.receipt_file, attempt.token) for attempt in selected.attempts))
+            if verdict.status == "accepted" and plan.agent not in available_agents:
+                raise RecordError(f"accepted verdict selected unavailable agent {plan.agent.value!r}")
+            worker_result = selected.attempts[verdict.attempts - 1].result_file if verdict.attempts else None
+            budget.check()
+            result = TaskResult(run_id=state.run_id, workspace=self.workspace, state_directory=state.root,
+                                session=selected.session, plan=plan, verdict=verdict, dsh=DshRunSummary.from_run(run),
+                                worker_result=worker_result if worker_result and worker_result.is_file() else None,
+                                tmux_socket=resources.socket)
+        except BaseException as exc:
+            context.first_error = exc
+        finally:
+            cleanup_started = time.monotonic()
+            cleanup_budget = context.cleanup_budget()
+
+            def collect(action, label: str) -> bool:
+                try:
+                    action()
+                    return True
+                except BaseException as exc:
+                    if not isinstance(exc, Exception) and context.first_error is None:
+                        context.first_error = exc
+                    diagnostics.append(f"{label}: {exc}")
+                    return False
+
+            # 停止标记不等待 supervision.lock。控制器的锁和所有等待也检查该标记。
+            if state is not None:
+                collect(lambda: atomic_write_json(state.root / "sdk-stop.json",
+                        {"run_id": state.run_id, "reason": str(context.first_error) if context.first_error else "run finalized"}), "stop marker")
+            if client is not None:
+                collect(lambda: client.close(budget=cleanup_budget.limit(max(0, cleanup_budget.deadline - time.monotonic()) * 0.4),
+                                             graceful=context.first_error is None), "DSH cleanup")
+                diagnostics.extend(client.close_errors)
+            for follower in followers:
+                collect(lambda f=follower: f.stop(budget=cleanup_budget.limit(
+                        min(0.5, max(0, cleanup_budget.deadline - time.monotonic()) * 0.15))), "worker log shutdown")
+            if resources is not None and state is not None:
+                # worker_log=False 时异常也尽力留下末屏，采样不能挤占回收所需预算。
+                if context.first_error is not None or (result is not None and not result.accepted):
+                    evidence_budget = cleanup_budget.limit(min(0.5, max(0, cleanup_budget.deadline - time.monotonic()) * 0.15))
+                    for agent in state.agents:
+                        def capture(agent=agent) -> None:
+                            session = TmuxSession(agent.session, socket_path=resources.socket, budget=evidence_budget)
+                            if session.exists():
+                                status = session.status()
+                                if status.run_id != state.run_id or status.workspace != str(self.workspace):
+                                    raise ValueError("worker identity does not match this run")
+                                (state.root / f"sdk-stop-{agent.kind.value}.txt").write_text(
+                                    session.capture(history_lines=HISTORY_LIMIT), encoding="utf-8")
+                        collect(capture, "final evidence")
+                retain = result.session if result is not None and result.accepted and config.keep_session and context.first_error is None else None
+                try:
+                    cleanup = cleanup_resources(resources.data, cleanup_budget, retain_session=retain)
+                except BaseException as exc:
+                    if not isinstance(exc, Exception) and context.first_error is None:
+                        context.first_error = exc
+                    cleanup = CleanupReport("incomplete", remaining_resources=({"kind": "run", "path": str(state.root)},), errors=(str(exc),))
+            if reporter is not None:
+                collect(lambda: reporter.emit(source="conductor", kind="run_end",
+                        message=f"verdict {result.verdict.status}" if result is not None and context.first_error is None else "run failed"), "final event")
+                collect(lambda: reporter.stop(budget=cleanup_budget), "reporter shutdown")
+                if reporter.dropped_events:
+                    diagnostics.append(f"{reporter.dropped_events} progress events were dropped")
+                if reporter.callback_inflight:
+                    diagnostics.append("a caller callback is still running; further delivery was stopped")
+            thread_resources = tuple({"kind": "thread", "name": f"worker-log-{f.agent}"}
+                                     for f in followers if f.is_alive)
+            if reporter is not None and reporter.heartbeat_alive:
+                thread_resources += ({"kind": "thread", "name": "dsh-heartbeat"},)
+            for reaper in context.reapers:
+                reaper.join(timeout=max(0, min(0.05, cleanup_budget.deadline - time.monotonic())))
+            thread_resources += tuple({"kind": "thread", "name": reaper.name}
+                                      for reaper in context.reapers if reaper.is_alive()
+                                      and not any(item.get("name") == reaper.name for item in cleanup.remaining_resources))
+            cleanup = replace(cleanup, elapsed_seconds=time.monotonic() - cleanup_started,
+                              errors=cleanup.errors + tuple(diagnostics),
+                              timed_out=cleanup.timed_out or bool(thread_resources and time.monotonic() >= cleanup_budget.deadline),
+                              status="incomplete" if thread_resources else cleanup.status,
+                              remaining_resources=cleanup.remaining_resources + thread_resources)
+            if resources is not None:
+                if not collect(lambda: resources.finish(cleanup), "persist cleanup report"):
+                    cleanup = replace(cleanup, errors=cleanup.errors + (diagnostics[-1],))
+                if not collect(resources.release, "release run lock"):
+                    cleanup = replace(cleanup, status="incomplete", errors=cleanup.errors + (diagnostics[-1],),
+                                      remaining_resources=cleanup.remaining_resources + ({"kind": "run_lock"},))
+            if workspace_lock is not None:
+                if not collect(workspace_lock.close, "release workspace lock"):
+                    cleanup = replace(cleanup, status="incomplete", errors=cleanup.errors + (diagnostics[-1],),
+                                      remaining_resources=cleanup.remaining_resources + ({"kind": "workspace_lock"},))
+            if client is not None:
+                collect(client.reap, "reap DSH")
+        if result is not None:
+            result = replace(result, cleanup=cleanup, worker_log=state.worker_log_file if state and state.worker_log_file.exists() else None)
+        error = context.first_error
+        if error is None and cleanup.status == "incomplete":
+            error = ConductorError("required run resources could not be cleaned up", code="cleanup_failed", phase="cleanup")
+        if error is not None:
+            if not isinstance(error, Exception):
+                raise error
+            if isinstance(error, ConductorError):
+                failure = error
+            elif isinstance(error, OperationError):
+                failure = ConductorError(str(error), code=error.code, phase=error.phase, details=error.details)
+            elif isinstance(error, RecordError):
+                failure = ConductorError(f"invalid or missing DSH result: {error}" if context.phase == "result_validation" else str(error),
+                                         code="result_invalid" if context.phase == "result_validation" else "preparation_failed",
+                                         phase=context.phase,
+                                         details={"validation_object": validation_object} if context.phase == "result_validation" else {})
+            elif isinstance(error, OSError) and context.phase == "preparation":
+                failure = ConductorError(str(error), code="preparation_failed", phase=context.phase)
+            else:
+                failure = ConductorError(str(error), code="internal_error", phase=context.phase)
+            failure.run_id = context.run_id
+            failure.state_directory = context.state_directory
+            failure.cleanup = cleanup
+            failure.result = result
+            if failure is error:
+                raise failure
+            raise failure from error
+        assert result is not None
+        return result

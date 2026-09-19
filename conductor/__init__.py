@@ -2,13 +2,17 @@
 
 from .dsh import DshClient, DshConfig, DshError, RunResult
 from .models import AgentKind, ExecutionPlan, Verdict
-from .progress import RunEvent
+from .progress import RunEvent, EventCallback
+from .runtime import CleanupReport, cleanup_run
 from .sdk import Conductor, ConductorConfig, ConductorError, TaskResult
 from ._version import __version__
 
 __all__ = [
     "AgentKind",
     "Conductor",
+    "CleanupReport",
+    "cleanup_run",
+    "EventCallback",
     "ConductorConfig",
     "ConductorError",
     "DshClient",

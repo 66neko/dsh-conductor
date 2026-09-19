@@ -14,6 +14,8 @@ from typing import TYPE_CHECKING, Iterator
 
 from .models import ExecutionPlan, JsonObject, RecordError, WorkerReceipt, read_json_object
 from .state import atomic_write_json
+from .lifecycle import acquire_lock
+from .runtime import controller_settings
 from .tmux import DEFAULT_CAPTURE_HISTORY_LINES, HISTORY_LIMIT, TmuxError, TmuxSession
 
 if TYPE_CHECKING:
@@ -35,13 +37,15 @@ class Supervisor:
         self.request = read_json_object(self.request_file)
         self.adapter = adapter
         self.workspace = Path(self.request["workspace"]).resolve()
-        plan = ExecutionPlan.load(Path(self.request["plan_file"]), expected_run_id=self.request["run_id"])
+        self.socket_path, self.budget, self.runtime_file = controller_settings(self.request, self.root)
+        plan = ExecutionPlan.load(Path(self.request["plan_file"]), expected_run_id=self.request["run_id"], budget=self.budget)
         if plan.agent.value != adapter.kind:
             raise SupervisionError("controller agent does not match the execution plan")
         self.agent = next((a for a in self.request["agents"] if a["agent"] == adapter.kind), None)
         if self.agent is None or self.agent["session"] != session_name:
             raise SupervisionError("session does not match this run")
-        self.session = TmuxSession(session_name)
+        self.session = TmuxSession(session_name, socket_path=self.socket_path, budget=self.budget,
+                                   runtime_file=self.runtime_file)
         self.path = self.root / "supervision.json"
         self.log_file = self.root / "supervision.jsonl"
         self.activity_file = self.root / "worker-activity.json"
@@ -53,7 +57,10 @@ class Supervisor:
     def locked(self) -> Iterator[JsonObject]:
         # 不跨 watch 的等待周期持锁，恢复/结束可以及时取得控制权。
         with (self.root / "supervision.lock").open("a") as handle:
-            fcntl.flock(handle, fcntl.LOCK_EX)
+            if self.budget is not None:
+                acquire_lock(handle, self.budget)
+            else:
+                fcntl.flock(handle, fcntl.LOCK_EX)
             state = read_json_object(self.path) if self.path.exists() else {
                 "schema_version": 1, "run_id": self.request["run_id"], "agent": self.adapter.kind,
                 "session": self.session.name, "phase": "new", "recoveries": 0, "attempt": 0,
@@ -81,7 +88,8 @@ class Supervisor:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     def attached(self) -> TmuxSession:
-        session = TmuxSession.attach(name=self.session.name, expected_agent=self.adapter.kind)
+        session = TmuxSession.attach(name=self.session.name, expected_agent=self.adapter.kind,
+                                     socket_path=self.socket_path, budget=self.budget, runtime_file=self.runtime_file)
         if Path(session.status().workspace).resolve() != self.workspace:
             raise SupervisionError("worker workspace does not match this run")
         return session
@@ -110,7 +118,7 @@ class Supervisor:
                 raise SupervisionError("refusing stale receipt or result")
             if state["attempt"]:
                 old = self.attempt(state)
-                WorkerReceipt.load(Path(old["receipt_file"]), expected_token=old["token"])
+                WorkerReceipt.load(Path(old["receipt_file"]), expected_token=old["token"], budget=self.budget)
                 if command is not None:
                     raise SupervisionError("follow-ups must use the original session")
                 self.attached()
@@ -118,7 +126,8 @@ class Supervisor:
                 if command is None:
                     raise SupervisionError("first attempt requires run")
                 TmuxSession.create(name=self.session.name, workspace=self.workspace, agent=self.adapter.kind,
-                                   command=command, activity_file=self.activity_file)
+                                   command=command, activity_file=self.activity_file, socket_path=self.socket_path,
+                                   budget=self.budget, runtime_file=self.runtime_file)
             state.update(attempt=number, phase="starting", submission=submission,
                          last_activity_at=time.time(), last_screen=None, last_bytes=0, ready_since=None,
                          acknowledged=None, observation=None)
@@ -193,7 +202,7 @@ class Supervisor:
             receipt_error = None
             if Path(attempt["receipt_file"]).exists():
                 try:
-                    receipt = WorkerReceipt.load(Path(attempt["receipt_file"]), expected_token=attempt["token"])
+                    receipt = WorkerReceipt.load(Path(attempt["receipt_file"]), expected_token=attempt["token"], budget=self.budget)
                     if state["phase"] != "handed_off":
                         state["phase"] = "handed_off"
                         self.record(state, "receipt", message=receipt.status)
@@ -298,6 +307,12 @@ class Supervisor:
         cleaned = re.sub(r"\b\d+(?:\.\d+)?\s*(?:ms|s|seconds?|秒)\b|\b\d+:\d+(?::\d+)?\b", "", cleaned, flags=re.I)
         return fingerprint(" ".join(cleaned.split()))
 
+    def pause(self, seconds: float) -> None:
+        if self.budget is None:
+            time.sleep(seconds)
+        else:
+            self.budget.sleep(seconds)
+
     def watch(self, *, wait_seconds: float = 300, acknowledge: int | None = None) -> JsonObject:
         if not math.isfinite(wait_seconds) or not 0 <= wait_seconds <= 300:
             raise SupervisionError("watch wait must be between 0 and 300 seconds")
@@ -325,7 +340,7 @@ class Supervisor:
                     self.save(state)
                     return self.response(state, result["status"], **observation,
                                          screen=re.sub(r"\b[a-f0-9]{48}\b", "[token]", screen[-4000:]))
-            time.sleep(min(10, remaining))
+            self.pause(min(10, remaining))
 
     def check_observation(self, state: JsonObject, number: int) -> None:
         if state["phase"] in {"new", "stopped", "handed_off"}:
@@ -338,7 +353,7 @@ class Supervisor:
         attempt = self.attempt(state)
         if Path(attempt["receipt_file"]).exists():
             try:
-                WorkerReceipt.load(Path(attempt["receipt_file"]), expected_token=attempt["token"])
+                WorkerReceipt.load(Path(attempt["receipt_file"]), expected_token=attempt["token"], budget=self.budget)
             except RecordError:
                 pass
             else:
@@ -373,7 +388,7 @@ class Supervisor:
             self.record(state, "recovery", message=reason, interrupt=interrupt)
             if interrupt:
                 session.send_keys("C-c")
-                time.sleep(1)
+                self.pause(1)
                 screen = self.current_screen(session)
                 if (self.adapter.is_menu(screen) or not self.adapter.is_ready(screen)
                         or self.adapter.busy_hint.search(screen)
@@ -421,7 +436,7 @@ class Supervisor:
             self.record(state, "choice", message=reason, keys=keys)
             for key in keys:
                 session.send_keys(key)
-                time.sleep(0.25)
+                self.pause(0.25)
             state.update(last_activity_at=time.time(), observation=None, acknowledged=None)
             self.save(state)
             # 返回真实操作后屏幕，DSH 必须确认选择生效。

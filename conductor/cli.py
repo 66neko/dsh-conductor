@@ -7,6 +7,9 @@ import json
 import math
 import os
 import shutil
+import signal
+import threading
+from contextlib import contextmanager
 import sys
 from pathlib import Path
 from typing import Any, Sequence
@@ -16,6 +19,8 @@ from .dsh import DshError, probe_dsh
 from .models import AgentKind, RecordError, read_json_object
 from .progress import RunEvent
 from .sdk import Conductor, ConductorConfig, ConductorError
+from .runtime import cleanup_run
+from .processes import boot_id
 from .skills import (
     dsh_home,
     prepare_workspace_skills,
@@ -73,6 +78,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         checks.append({"name": name, "ok": ok, "required": required, "detail": str(detail)})
 
     add("python", sys.version_info >= (3, 13), sys.version.split()[0])
+    add("process-identity", bool(boot_id()), "Linux /proc boot ID and process start identity")
     tmux = shutil.which("tmux")
     add("tmux", tmux is not None, tmux or "not found")
     try:
@@ -98,37 +104,62 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
-def cmd_run(args: argparse.Namespace) -> int:
-    workspace = args.workspace.expanduser().resolve()
+@contextmanager
+def _run_signals():
+    cancel = threading.Event()
+    received: list[int] = []
+    previous = {}
+
+    def handler(signum, _frame):
+        if not received:
+            received.append(signum)
+        cancel.set()
+
+    if threading.current_thread() is threading.main_thread():
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            previous[signum] = signal.signal(signum, handler)
     try:
-        config = ConductorConfig(
-            dsh_bin=args.dsh_bin,
-            dsh_home=args.dsh_home,
-            state_dir=args.state_dir,
-            provider=args.provider,
-            model=args.model,
-            max_attempts=args.max_attempts,
-            worker_idle_timeout_seconds=args.worker_idle_timeout_seconds,
-            max_recovery_attempts=args.max_recovery_attempts,
-            sdk_heartbeat_counts_as_activity=args.sdk_heartbeat_counts_as_activity,
-            timeout_seconds=args.timeout_seconds,
-            keep_session=args.keep_session,
-            heartbeat_seconds=args.heartbeat_seconds,
-            worker_log=args.worker_log,
-            worker_log_interval_seconds=args.worker_log_interval_seconds,
-        )
-        result = Conductor(workspace, config).run(
-            args.prompt,
-            on_event=None if args.quiet else _event_to_stderr,
-        )
-    except (ConductorError, ValueError, OSError) as exc:
-        if isinstance(exc, ConductorError):
+        yield cancel, received
+    finally:
+        for signum, original in previous.items():
+            signal.signal(signum, original)
+
+
+def cmd_run(args: argparse.Namespace) -> int:
+    with _run_signals() as (cancel, received):
+        try:
+            try:
+                config = ConductorConfig(
+                    dsh_bin=args.dsh_bin, dsh_home=args.dsh_home, state_dir=args.state_dir,
+                    provider=args.provider, model=args.model, max_attempts=args.max_attempts,
+                    worker_idle_timeout_seconds=args.worker_idle_timeout_seconds,
+                    max_recovery_attempts=args.max_recovery_attempts,
+                    sdk_heartbeat_counts_as_activity=args.sdk_heartbeat_counts_as_activity,
+                    timeout_seconds=args.timeout_seconds, cleanup_timeout_seconds=args.cleanup_timeout_seconds,
+                    keep_session=args.keep_session, heartbeat_seconds=args.heartbeat_seconds,
+                    worker_log=args.worker_log, worker_log_interval_seconds=args.worker_log_interval_seconds,
+                )
+            except ValueError as exc:
+                raise ConductorError(str(exc), code="invalid_config", phase="validation") from exc
+            result = Conductor(args.workspace, config).run(args.prompt, cancel_event=cancel,
+                             on_event=None if args.quiet else _event_to_stderr)
+        except ConductorError as exc:
+            if received:
+                exc.details["signal"] = received[0]
             _json(exc.to_json())
-        else:
-            _json({"schema_version": 1, "status": "error", "error": str(exc)})
-        return 1
-    _json(result.to_json())
-    return 0 if result.accepted else 1
+            if exc.timed_out:
+                return 124
+            if exc.cancelled and received:
+                return 128 + received[0]
+            return 1
+        _json(result.to_json())
+        return 0 if result.accepted else 1
+
+
+def cmd_cleanup(args: argparse.Namespace) -> int:
+    report = cleanup_run(args.state_directory, timeout_seconds=args.timeout_seconds)
+    _json({"schema_version": 1, **report.to_json()})
+    return 1 if report.status == "incomplete" else 0
 
 
 def cmd_show(args: argparse.Namespace) -> int:
@@ -160,7 +191,7 @@ def cmd_show(args: argparse.Namespace) -> int:
         _json({"schema_version": 1, "status": "error", "error": str(exc)})
         return 1
     output: JsonObject = {"schema_version": 1, "run_directory": str(run_root), "request": request}
-    for name in ("user-prompt.md", "manager-prompt.md", "plan.json", "verdict.json", "supervision.json", "supervision.jsonl", "worker-screen.log"):
+    for name in ("user-prompt.md", "manager-prompt.md", "plan.json", "verdict.json", "runtime.json", "supervision.json", "supervision.jsonl", "worker-screen.log"):
         path = run_root / name
         if not path.exists():
             continue
@@ -199,8 +230,20 @@ def _non_empty(value: str) -> str:
     return value
 
 
+class JsonArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        raise ConductorError(message, code="invalid_input", phase="validation")
+
+    def _get_value(self, action, arg_string):
+        try:
+            return super()._get_value(action, arg_string)
+        except argparse.ArgumentError as exc:
+            code = "invalid_input" if action.dest in {"workspace", "prompt", "state_directory"} else "invalid_config"
+            raise ConductorError(str(exc), code=code, phase="validation", details={"argument": action.dest}) from exc
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="conductor", description="通过 DSH 管理并验收编码任务。")
+    parser = JsonArgumentParser(prog="conductor", description="通过 DSH 管理并验收编码任务。")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     commands = parser.add_subparsers(dest="command", required=True)
     run = commands.add_parser("run", help="运行一个包含任务与验收标准的 prompt")
@@ -217,6 +260,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--dsh-bin")
     run.add_argument("--dsh-home", type=Path)
     run.add_argument("--state-dir", type=Path)
+    run.add_argument("--cleanup-timeout-seconds", type=_positive_float, default=5.0)
     run.add_argument("--keep-session", action="store_true")
     run.add_argument("--quiet", action="store_true")
     run.add_argument("--heartbeat-seconds", type=_positive_float, default=10.0)
@@ -228,6 +272,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="tmux worker 屏幕采样间隔，默认 10 秒；结束时立即补采",
     )
     run.set_defaults(func=cmd_run)
+    cleanup = commands.add_parser("cleanup", help="幂等清理已停止运行的遗留资源")
+    cleanup.add_argument("--state-directory", type=Path, required=True)
+    cleanup.add_argument("--timeout-seconds", type=_positive_float, default=5.0)
+    cleanup.set_defaults(func=cmd_cleanup)
     install = commands.add_parser("install-skills", help="将两个 skill 复制到指定 workspace")
     install.add_argument("--workspace", type=Path, required=True)
     install.set_defaults(func=cmd_install_skills)
@@ -244,12 +292,17 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
     try:
+        args = build_parser().parse_args(argv)
         return args.func(args)
+    except ConductorError as exc:
+        _json(exc.to_json())
+        return 124 if exc.timed_out else 1
     except KeyboardInterrupt:
-        _json({"schema_version": 1, "status": "error", "error": "interrupted"})
+        _json(ConductorError("interrupted", code="cancelled", phase="validation").to_json())
         return 130
     except (DshError, OSError) as exc:
-        _json({"schema_version": 1, "status": "error", "error": str(exc)})
+        code = exc.code if isinstance(exc, DshError) else "preparation_failed"
+        phase = exc.phase if isinstance(exc, DshError) else "preparation"
+        _json(ConductorError(str(exc), code=code, phase=phase).to_json())
         return 1

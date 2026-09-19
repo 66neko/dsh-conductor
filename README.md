@@ -8,7 +8,7 @@ DSH 由运行环境提供，本项目不会安装或调用模型 API。Claude Co
 
 ### 1. 准备运行环境
 
-项目要求 Python 3.13 或更高版本。`dsh-conductor` 本身是零第三方依赖的 Python SDK，
+项目要求 Python 3.13 或更高版本。完整运行与恢复清理当前支持 Linux（含 WSL2），进程身份核验使用 `/proc`。`dsh-conductor` 本身是零第三方依赖的 Python SDK，
 但运行任务时还需要由运行环境提供 DSH、`tmux`，以及 prompt 选择的 worker（Claude Code
 或 Codex）。SDK 不安装 DSH，也不调用模型 API。
 
@@ -17,7 +17,7 @@ DSH 由运行环境提供，本项目不会安装或调用模型 API。Claude Co
 ```bash
 cd /path/to/your-project
 python3.13 -m venv .venv
-source .venv/bin/activate                 # Windows PowerShell: .venv\Scripts\Activate.ps1
+source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install dsh-conductor
 ```
@@ -87,7 +87,9 @@ Codex”；没有明确指定时，DSH 根据任务与当前环境选择。调�
 - `plan`：DSH 生成的 agent、任务摘要、步骤和带 ID 的验收项；
 - `verdict`：DSH 独立检查后的 `accepted`/`rejected`、每项证据、产物和剩余问题；
 - `state_directory`：本轮 request、plan、task、receipt、verdict 与 `worker-screen.log`；
-- `dsh`：协议状态、耗时、事件数量和 DSH 最后文本。
+- `dsh`：协议状态、耗时、事件数量和 DSH 最后文本；
+- `cleanup`：资源清理状态、未回收资源和诊断；
+- `tmux_socket` / `attach_command`：本轮私有 tmux socket 和观察命令。
 
 被 DSH 拒绝是正常业务结果，`result.accepted` 为 `False`；DSH 启动失败、协议失败或结果文件不合法时抛出 `ConductorError`。
 
@@ -110,7 +112,51 @@ else:
 目录包含原始 prompt、DSH 计划、worker task/receipt、verdict 和可选的 tmux 屏幕日志，
 建议将 `.dsh/` 与 `.dsh-conductor/` 加入项目的 Git 忽略规则。
 
-### 4. 可直接运行的示例
+### 4. 取消、总时限与清理
+
+```python
+import threading
+from conductor import Conductor, ConductorConfig, ConductorError, cleanup_run
+
+cancel = threading.Event()  # 外部 Runtime 可以随时在另一个线程调用 cancel.set()
+try:
+    result = Conductor(workspace, ConductorConfig(
+        timeout_seconds=600, cleanup_timeout_seconds=5,
+    )).run(prompt, cancel_event=cancel)
+    print(result.cleanup.status)  # completed 或明确保留会话时的 retained
+except ConductorError as exc:
+    print(exc.code, exc.phase, exc.to_json())
+    if exc.cleanup and exc.cleanup.status == "incomplete" and exc.state_directory:
+        print(cleanup_run(exc.state_directory).to_json())
+```
+
+`timeout_seconds` 覆盖准备、初始化、执行、验收和清理。运行前预留
+`min(cleanup_timeout_seconds, timeout_seconds * 0.1)` 给清理，例如 600 秒任务最晚在
+第 595 秒进入清理。阶段 timeout 只能缩短等待，活动、watch 和返工不延长总截止时间。
+这是相对 0.4.1 的行为变更；旧版只限制 DSH 管理回合。
+
+`keep_session=True` 仅在 accepted 时保留 worker；rejected、取消、超时和执行故障都清理。
+保留会话不删除任何审计文件。观察时使用 `result.attach_command`，清理时可以调用
+`cleanup_run(result.state_directory)`，或运行：
+
+```bash
+conductor cleanup --state-directory /absolute/path/to/run
+```
+
+异常按 `code` 分支，不解析错误文字。原执行错误不会被清理失败覆盖；可信 verdict 已生成但
+必需资源未回收时抛出 `cleanup_failed`，`exc.result` 保留已验证结果，避免误重跑任务。
+`ConductorConfig` 非法值仍抛 `ValueError`；CLI 转成 `invalid_config` JSON。
+
+SDK 不改宿主信号处理器。CLI 把 SIGINT/SIGTERM 转为取消，清理后退出；退出码依次为
+accepted=0、rejected/普通错误=1、timeout=124、SIGINT=130、SIGTERM=143。
+同一 workspace 的重叠运行返回 `workspace_busy`；不同工作区可以独立运行。
+
+回调在独立线程串行执行，默认最多缓存 1024 条进度事件，积压时丢弃旧展示事件；文件证据
+保留。回调应及时返回。SDK 可以停止后续派发，但不能强制中止已执行的任意 Python 回调。
+完整边界、错误码和迁移说明见 [运行生命周期](docs/lifecycle.md)。
+取消示例见 [examples/cancellation.py](examples/cancellation.py)。
+
+### 5. 可直接运行的示例
 
 下例以 `run_task.py` 在已激活的虚拟环境中运行时为例：
 
@@ -215,7 +261,8 @@ Codex 使用 bracketed paste，先读屏确认草稿，再发送 Enter；草稿�
 | `sdk_heartbeat_counts_as_activity` | True | SDK waiting 心跳也重置活动时钟 |
 | `max_recovery_attempts` | 5 | 全 run 主动恢复上限，可设 1–5 |
 | `max_attempts` | 2 | 业务委派总轮数（含首轮），与恢复次数分开 |
-| `timeout_seconds` | 3600 | DSH 管理回合总时限，活动和恢复都不重置 |
+| `timeout_seconds` | 3600 | 整个 run 的总预算，包含准备、初始化、执行、验收和清理 |
+| `cleanup_timeout_seconds` | 5 | 清理阶段上限，同时受总截止时间限制 |
 
 日志中的 `waiting for bash（工具调用累计 202s，非静默计时）` 表示 DSH 当前工具调用已等待
 多久，收到 worker 输出不会重置这个累计值。真正的静默时间见 watch 返回的 `silence_seconds`，
@@ -251,7 +298,7 @@ SDK 可通过 `ConductorConfig(worker_log_interval_seconds=...)` 调整间隔，
 Codex 的 `• Working (1m 05s • esc to interrupt)` 行会保留实际计时；下一次采样的计时变化
 会作为替换行写入 `worker-screen.log` 和 worker 输出事件，用于观察 worker 活动。
 大段重复历史会保存完整变化区域而不做昂贵的精细比较，因此诊断日志可能包含重复上下文。
-运行结束时无需等待下个周期，立即扩大到最多 50000 行历史补采一次。正常验收结束由 SDK 补采后
+运行结束时无需等待下个周期，在剩余清理预算内扩大到最多 50000 行历史补采一次。正常验收结束由 SDK 补采后
 按 `keep_session` 清理会话；DSH 主动 stop 则先保存末屏到 observations，再关闭会话。
 两个 skill 的 `capture` 同样默认读取 5000 行历史，可用 `--history-lines 50000` 扩大范围，
 或用 `--history-lines 0` 只看当前屏幕。控制器处理菜单时始终只看当前屏幕，避免误认历史菜单。
@@ -266,6 +313,9 @@ Codex 的 `• Working (1m 05s • esc to interrupt)` 行会保留实际计时�
 ```text
 <workspace>/.dsh-conductor/runs/<run-id>/
 ├── request.json
+├── runtime.json             # 资源归属、临时截止时间和最终清理报告
+├── resources/               # 进程启动身份与已观察到的受管进程
+├── run.lock                 # 防止恢复清理与活动运行竞争
 ├── user-prompt.md
 ├── manager-prompt.md
 ├── plan.json
@@ -276,7 +326,7 @@ Codex 的 `• Working (1m 05s • esc to interrupt)` 行会保留实际计时�
 ├── worker-activity.json     # 原始终端字节计数及最后输出时间
 ├── sdk-heartbeat.json       # SDK 心跳时间（计入活动时生成）
 ├── observations/            # DSH 操作前屏幕证据，stop 保存最终历史
-├── sdk-stop.json            # 失败/总超时的结束原因（发生时生成）
+├── sdk-stop.json            # SDK 已进入清理，阻止继续提交/恢复
 ├── sdk-stop-<agent>.txt      # SDK 兜底结束前的历史快照（发生时生成）
 └── attempts/
     ├── claude/1/{task.md,result.md,receipt.json}

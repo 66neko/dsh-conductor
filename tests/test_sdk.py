@@ -4,105 +4,66 @@ import tempfile
 import unittest
 from unittest import mock
 from pathlib import Path
-from types import SimpleNamespace
 
 from conductor.progress import RunEvent
 from conductor.sdk import Conductor, ConductorConfig, ConductorError
-from conductor.tmux import HISTORY_LIMIT
 
 
 class SdkTests(unittest.TestCase):
     def test_rejected_without_receipt_stops_worker_even_with_keep_session_and_no_logs(self) -> None:
         fixture = Path(__file__).parent / "fixtures" / "fake_dsh.py"
+        from conductor.tmux import TmuxSession
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
-            sessions = {}
-
-            def session_factory(name: str) -> mock.Mock:
-                session = sessions.setdefault(name, mock.Mock())
-                session.exists.return_value = 'claude' in name
-                session.status.return_value = SimpleNamespace(agent='claude', workspace=str(workspace))
-                session.capture.return_value = 'last long output'
-                return session
-
-            config = ConductorConfig(dsh_bin=str(fixture), dsh_home=workspace, worker_log=False, keep_session=True,
-                                     dsh_extra_env={"FAKE_DSH_SDK": "1", "FAKE_DSH_REJECTED": "1"})
-            with (mock.patch("conductor.skills.shutil.which", return_value="/bin/true"),
-                  mock.patch("conductor.sdk.TmuxSession", side_effect=session_factory)):
-                result = Conductor(workspace, config).run('test')
+            config = ConductorConfig(dsh_bin=str(fixture), worker_log=False, keep_session=True,
+                                     timeout_seconds=10, dsh_extra_env={"FAKE_DSH_SDK": "1", "FAKE_DSH_REJECTED": "1", "FAKE_DSH_WORKER": "1"})
+            with mock.patch("conductor.skills.shutil.which", return_value="/bin/true"):
+                result = Conductor(workspace, config).run("test")
             self.assertFalse(result.accepted)
             self.assertIsNone(result.worker_result)
-            self.assertTrue((result.state_directory / 'sdk-stop.json').exists())
-            self.assertEqual((result.state_directory / 'sdk-stop-claude.txt').read_text(), 'last long output')
-            sessions[result.session].capture.assert_called_once_with(history_lines=HISTORY_LIMIT)
-            sessions[result.session].close.assert_called_once()
+            self.assertEqual(result.cleanup.status, "completed")
+            self.assertTrue((result.state_directory / "sdk-stop.json").exists())
+            self.assertIn("fixture worker evidence", (result.state_directory / "sdk-stop-claude.txt").read_text())
+            self.assertFalse(TmuxSession(result.session, socket_path=result.tmux_socket).exists())
 
-    def test_overall_timeout_stops_only_matching_candidate_after_final_sampling(self) -> None:
+    def test_overall_timeout_stops_worker_and_retains_evidence(self) -> None:
+        fixture = Path(__file__).parent / "fixtures" / "fake_dsh.py"
+        from conductor.tmux import TmuxSession
+        import json
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
-            order = []
-            sessions = {}
+            config = ConductorConfig(dsh_bin=str(fixture), keep_session=True, worker_log=False, timeout_seconds=3,
+                                     dsh_extra_env={"FAKE_DSH_SDK": "1", "FAKE_DSH_WORKER": "1", "FAKE_DSH_NO_TURN": "1"})
+            with mock.patch("conductor.skills.shutil.which", return_value="/bin/true"):
+                with self.assertRaises(ConductorError) as caught:
+                    Conductor(workspace, config).run("test")
+            error = caught.exception
+            self.assertEqual(error.code, "timeout")
+            # 3 秒总预算只预留 0.3 秒；CI 繁忙时可以如实报告核验未完成，
+            # 但 worker 必须已停止，且剩余核验可通过恢复清理完成。
+            self.assertIn(error.cleanup.status, {"completed", "incomplete"})
+            runtime = json.loads((error.state_directory / "runtime.json").read_text())
+            for name in runtime["sessions"]:
+                self.assertFalse(TmuxSession(name, socket_path=Path(runtime["tmux_socket"])).exists())
+            from conductor import cleanup_run
+            self.assertEqual(cleanup_run(error.state_directory).status, "completed")
 
-            def session_factory(name: str) -> mock.Mock:
-                session = sessions.setdefault(name, mock.Mock())
-                session.exists.return_value = True
-                # 另一个候选即使存在，也不能误杀不同身份的会话。
-                session.status.return_value = SimpleNamespace(agent='codex', workspace=str(workspace))
-                session.capture.side_effect = lambda **kw: order.append('capture') or 'timeout evidence'
-                session.close.side_effect = lambda: order.append('close')
-                return session
-
-            config = ConductorConfig(dsh_home=workspace, keep_session=True, worker_log=False)
-            with (mock.patch("conductor.skills.shutil.which", return_value="/bin/true"),
-                  mock.patch("conductor.sdk.TmuxSession", side_effect=session_factory),
-                  mock.patch("conductor.sdk.DshClient") as client):
-                client.return_value.__enter__.return_value.run.return_value = SimpleNamespace(status='timeout', stderr_tail='')
-                with self.assertRaisesRegex(ConductorError, 'timeout') as caught:
-                    Conductor(workspace, config).run('test')
-            self.assertEqual(order, ['capture', 'close'])
-            root = caught.exception.state_directory
-            self.assertTrue((root / 'sdk-stop.json').exists())
-            self.assertEqual((root / 'sdk-stop-codex.txt').read_text(), 'timeout evidence')
-            for name, session in sessions.items():
-                if 'claude' in name:
-                    session.close.assert_not_called()
-
-    def test_session_cleanup_follows_final_sampling_and_respects_identity(self) -> None:
+    def test_final_sampling_precedes_worker_cleanup_and_retention_is_reported(self) -> None:
         fixture = Path(__file__).parent / "fixtures" / "fake_dsh.py"
-        for keep_session, matching in ((False, True), (True, True), (False, False)):
-            with self.subTest(keep_session=keep_session, matching=matching), tempfile.TemporaryDirectory() as directory:
-                workspace = Path(directory)
-                order: list[str] = []
-
-                def follower(**kwargs: object) -> mock.Mock:
-                    instance = mock.Mock()
-                    instance.start.return_value = instance
-                    instance.stop.side_effect = lambda: order.append(f"stop {kwargs['agent']}")
-                    return instance
-
-                config = ConductorConfig(
-                    dsh_bin=str(fixture), dsh_home=workspace, keep_session=keep_session,
-                    dsh_extra_env={"FAKE_DSH_SDK": "1"}, timeout_seconds=2,
-                )
-                with (
-                    mock.patch("conductor.skills.shutil.which", return_value="/bin/true"),
-                    mock.patch("conductor.sdk.WorkerLogFollower", side_effect=follower),
-                    mock.patch("conductor.sdk.TmuxSession") as session_type,
-                ):
-                    session = session_type.return_value
-                    session.exists.return_value = True
-                    session.status.return_value = SimpleNamespace(
-                        agent="claude" if matching else "codex", workspace=str(workspace),
-                    )
-                    session.close.side_effect = lambda: order.append("close")
-                    result = Conductor(workspace, config).run("创建 fixture.txt 并验证文件存在")
-                    self.assertTrue(result.accepted)
-                    if not keep_session and matching:
-                        self.assertEqual(order, ["stop claude", "stop codex", "close"])
-                        session_type.assert_called_once_with(result.session)
-                    else:
-                        self.assertEqual(order, ["stop claude", "stop codex"])
-                        session.close.assert_not_called()
+        from conductor import cleanup_run
+        from conductor.tmux import TmuxSession
+        for keep_session in (False, True):
+            with self.subTest(keep_session=keep_session), tempfile.TemporaryDirectory() as directory:
+                config = ConductorConfig(dsh_bin=str(fixture), keep_session=keep_session, timeout_seconds=10,
+                                         dsh_extra_env={"FAKE_DSH_SDK": "1", "FAKE_DSH_WORKER": "1"})
+                with mock.patch("conductor.skills.shutil.which", return_value="/bin/true"):
+                    result = Conductor(directory, config).run("test")
+                try:
+                    self.assertEqual(result.cleanup.status, "retained" if keep_session else "completed")
+                    self.assertIn("fixture worker evidence", result.worker_log.read_text())
+                    self.assertEqual(TmuxSession(result.session, socket_path=result.tmux_socket).exists(), keep_session)
+                finally:
+                    self.assertEqual(cleanup_run(result.state_directory).status, "completed")
 
     def test_run_returns_plan_verdict_and_events(self) -> None:
         fixture = Path(__file__).parent / "fixtures" / "fake_dsh.py"

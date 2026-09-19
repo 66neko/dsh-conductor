@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import time
 import unittest
 from unittest import mock
 from pathlib import Path
@@ -9,6 +10,13 @@ from conductor.dsh import DshClient, DshConfig, DshError, resolve_node_bin
 
 
 class DshClientTests(unittest.TestCase):
+    def test_direct_client_serial_turns_each_receive_their_own_budget(self) -> None:
+        fixture = Path(__file__).parent / "fixtures" / "fake_dsh.py"
+        with tempfile.TemporaryDirectory() as directory, DshClient(DshConfig(workspace=Path(directory), dsh_bin=str(fixture))) as client:
+            self.assertTrue(client.run("first", session_id="first", timeout_seconds=0.15).ok)
+            time.sleep(0.2)
+            self.assertTrue(client.run("second", session_id="second", timeout_seconds=0.15).ok)
+
     def test_explicit_missing_node_is_rejected(self) -> None:
         with mock.patch.dict("os.environ", {"DSH_NODE": "/does/not/exist"}):
             with self.assertRaisesRegex(DshError, "DSH_NODE"):

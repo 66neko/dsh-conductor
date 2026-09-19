@@ -28,7 +28,7 @@ python3.13 -m conductor run \
 ```
 
 实时日志由 CLI 写入 stderr，不会破坏 `result.json`。CLI 对 `accepted` 返回退出码
-`0`，对 `rejected` 和 `error` 返回退出码 `1`。
+`0`，对 `rejected` 和普通 `error` 返回 `1`；timeout 返回 `124`，SIGINT/SIGTERM 取消分别返回 `130`/`143`。
 
 ## 完整示例
 
@@ -42,6 +42,16 @@ python3.13 -m conductor run \
   "workspace": "/home/user/projects/demo",
   "state_directory": "/home/user/projects/demo/.dsh-conductor/runs/20260914T071530.123456Z-a1b2c3d4e5f6",
   "session": "dsh-codex-a1b2c3d4e5f6",
+  "tmux_socket": "/tmp/dshc-example/tmux.sock",
+  "attach_command": "tmux -S /tmp/dshc-example/tmux.sock attach -t dsh-codex-a1b2c3d4e5f6",
+  "cleanup": {
+    "status": "completed",
+    "elapsed_seconds": 0.25,
+    "timed_out": false,
+    "remaining_resources": [],
+    "retained_resources": [],
+    "errors": []
+  },
   "plan": {
     "schema_version": 1,
     "run_id": "20260914T071530.123456Z-a1b2c3d4e5f6",
@@ -110,6 +120,9 @@ python3.13 -m conductor run \
 | `status` | string | 是 | DSH 验收结论，只能是 `accepted` 或 `rejected`。 |
 | `workspace` | string | 是 | worker 修改并由 DSH 验收的工作目录，使用解析后的绝对路径。 |
 | `state_directory` | string | 是 | 本轮运行记录目录的绝对路径。计划、验收结论、prompt 和回执均保存在这里。 |
+| `tmux_socket` | string | 否 | 本轮私有 tmux socket；正常 SDK run 总会提供，兼容手工构造的旧 TaskResult 时可省略。 |
+| `attach_command` | string | 是 | 包含私有 socket 的完整观察命令；仅 retained 时保证会话被有意保留。 |
+| `cleanup` | object | 是 | 必需资源的清理结果，见下文。 |
 | `session` | string | 是 | 被选中 worker 的 tmux 会话名，例如 `dsh-codex-a1b2c3d4e5f6`。会话可能已按运行配置关闭。 |
 | `plan` | object | 是 | DSH 在执行前产生的结构化任务计划，格式见 [`plan`](#plan-对象)。 |
 | `verdict` | object | 是 | DSH 独立验收后产生的结论，格式见 [`verdict`](#verdict-对象)。 |
@@ -244,7 +257,20 @@ CLI 会捕获这类异常，并在 stdout 输出如下 JSON：
 {
   "schema_version": 1,
   "status": "error",
-  "error": "DSH failed: DSH turn timed out",
+  "error": "dsh_initialize exceeded its deadline",
+  "code": "timeout",
+  "phase": "dsh_initialize",
+  "timed_out": true,
+  "cancelled": false,
+  "details": {"timeout_scope": "stage", "rpc_method": "initialize"},
+  "cleanup": {
+    "status": "completed",
+    "elapsed_seconds": 0.12,
+    "timed_out": false,
+    "remaining_resources": [],
+    "retained_resources": [],
+    "errors": []
+  },
   "run_id": "20260914T071530.123456Z-a1b2c3d4e5f6",
   "state_directory": "/home/user/projects/demo/.dsh-conductor/runs/20260914T071530.123456Z-a1b2c3d4e5f6"
 }
@@ -254,7 +280,14 @@ CLI 会捕获这类异常，并在 stdout 输出如下 JSON：
 |---|---|---:|---|
 | `schema_version` | integer | 是 | 错误对象 schema 版本，当前固定为 `1`。 |
 | `status` | string | 是 | 固定为 `error`。 |
-| `error` | string | 是 | 供调用方诊断的错误消息。 |
+| `error` | string | 是 | 供调用方诊断的错误消息，不用于程序分类。 |
+| `code` | string | 是 | 稳定的错误码，见下表。 |
+| `phase` | string | 是 | 实际发生错误的阶段，不从日志文字猜测。 |
+| `timed_out` | boolean | 是 | 等价于 code == timeout。 |
+| `cancelled` | boolean | 是 | 等价于 code == cancelled。 |
+| `details` | object | 是 | 可选诊断字段，例如 rpc_method、return_code、timeout_scope、signal。 |
+| `cleanup` | object | 否 | run 已进入生命周期时附带清理报告；构造/CLI 参数错误可省略。 |
+| `result` | object | 否 | 执行已形成可信结果、但随后清理失败等情况下的 TaskResult；不能据此忽略顶层 error。 |
 | `run_id` | string | 否 | 如果错误发生前已创建运行状态，则返回本次 run id。 |
 | `state_directory` | string | 否 | 如果错误发生前已创建运行状态，则返回运行记录目录。 |
 
@@ -262,7 +295,49 @@ CLI 会捕获这类异常，并在 stdout 输出如下 JSON：
 `state_directory`。因此调用方必须按可选字段处理，不能用 `null` 判断。
 
 总超时或 DSH 异常时 SDK 会停止身份匹配的本 run worker 并保留 sdk-stop.json 和末次历史快照，
-不会伪造 rejected verdict；错误 JSON 与业务拒绝仍明确区分。keep_session 只保留正常验收结束的会话。
+不会伪造 rejected verdict；错误 JSON 与业务拒绝仍明确区分。keep_session 只允许保留 accepted 的会话。
+
+## 错误码与清理报告
+
+| code | 含义 |
+|---|---|
+| invalid_input | prompt、workspace、回调或取消参数非法 |
+| invalid_config | CLI 配置非法；直接构造 ConductorConfig 仍抛 ValueError |
+| workspace_busy | 同一 workspace 正有运行占用 |
+| dependency_missing | 缺少 SDK 必需依赖、skill 或受支持的进程身份核验能力 |
+| preparation_failed | skill、运行文件或资源元数据准备失败 |
+| dsh_start_failed | 启动 DSH 子进程失败 |
+| dsh_rpc_failed | JSON-RPC 写入或错误响应 |
+| dsh_protocol_error | 非法帧或必要协议字段错误 |
+| dsh_process_exited | 协议完成前 DSH 退出，包括 completed 后尚未 idle 就退出 |
+| dsh_execution_failed | 合法协议回合明确报告非 completed 结果 |
+| result_invalid | plan/verdict/receipt/result 或工作区事实校验失败 |
+| timeout | 阶段或全局执行截止时间耗尽 |
+| cancelled | 调用方取消或 CLI 信号取消 |
+| cleanup_failed | 执行已完成，但必需资源未清理/无法核验 |
+| internal_error | 未预期的内部异常 |
+
+phase 的高层值为 validation、preparation、dsh_start、dsh_initialize、dsh_prompt、dsh_run、
+result_validation、cleanup；控制器在确实知道阶段时使用 worker_run。
+`details.timeout_scope` 为 stage 或 total。错误原因链在 Python 异常中保留。
+合法业务 rejected 不属于上述运行故障；用户指定的 worker 不可用，也可以由 DSH 形成
+attempts=0 的合法 rejected。
+
+cleanup 对象字段如下，独立于顶层业务 status：
+
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| status | string | completed、retained 或 incomplete |
+| elapsed_seconds | number | 清理耗时 |
+| timed_out | boolean | 清理等待是否耗尽截止时间，不改变主错误 code |
+| remaining_resources | array[object] | 存活或无法确认的必需资源，包含 kind 及诊断信息 |
+| retained_resources | array[object] | 按 keep_session 有意保留的会话及 socket |
+| errors | array[string] | 清理和可观测性诊断；非空不一定意味着 incomplete |
+
+取消/超时等原错误不会被清理失败覆盖。没有原错误但必需清理 incomplete 时返回
+cleanup_failed，错误的 result 字段保留已校验的业务结果，原 verdict 文件也保留。
+回调异常和展示事件丢弃不会改写 verdict。已运行的调用方回调可能仍在执行，报告会提示。
+恢复清理接口、时间预算与不能保证回收的边界见 [运行生命周期](lifecycle.md)。
 
 ## 实时事件 `RunEvent`
 
@@ -287,7 +362,8 @@ CLI 会捕获这类异常，并在 stdout 输出如下 JSON：
 | `raw` | object | 否 | 对应的原始 DSH 协议事件。worker 屏幕日志、心跳和 conductor 自身事件通常不包含该字段。 |
 
 `RunEvent` 是可观测性数据，不会追加到最终 `TaskResult` JSON。回调异常也不会改变任务
-执行和最终验收结果。
+执行和最终验收结果。回调在独立线程串行执行；队列最多 1024 条，积压时丢弃旧展示事件。
+退出只在剩余预算内收尾，已经进入的用户回调无法强制终止。持久化证据不依赖回调。
 
 监督另会发出 `supervision_needs_attention`、`supervision_recovery`、`supervision_choice`、
 `supervision_receipt` 和 `supervision_stopped` 等事件；raw 携带相应审计记录，恢复消息包含累计次数。

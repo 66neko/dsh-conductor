@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import stat
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Sequence
+
+from .lifecycle import Budget
 
 type JsonObject = dict[str, Any]
 
@@ -64,9 +68,32 @@ def _string_list(record: JsonObject, key: str, *, non_empty: bool = False) -> tu
     return tuple(value)
 
 
-def read_json_object(path: Path) -> JsonObject:
+def _read_text(path: Path, budget: Budget | None = None) -> str:
+    chunks = []
+    # 非阻塞 open + fstat 拒绝 FIFO/设备，避免伪装成结果文件的管道无限等待。
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise RecordError(f"record must be a regular file: {path}")
+        handle = os.fdopen(fd, encoding="utf-8")
+    except BaseException:
+        os.close(fd)
+        raise
+    with handle:
+        while True:
+            if budget is not None:
+                budget.check()
+            chunk = handle.read(65536)
+            if not chunk:
+                return "".join(chunks)
+            chunks.append(chunk)
+
+
+def read_json_object(path: Path, *, budget: Budget | None = None) -> JsonObject:
+    try:
+        value = json.loads(_read_text(path, budget))
+        if budget is not None:
+            budget.check()
     except OSError as exc:
         raise RecordError(f"cannot read {path}: {exc}") from exc
     except (json.JSONDecodeError, UnicodeError) as exc:
@@ -79,10 +106,10 @@ def worker_result_path(receipt_file: Path) -> Path:
     return receipt_file.with_name("result.md")
 
 
-def read_worker_result(receipt_file: Path) -> str:
+def read_worker_result(receipt_file: Path, *, budget: Budget | None = None) -> str:
     path = worker_result_path(receipt_file)
     try:
-        content = path.read_text(encoding="utf-8")
+        content = _read_text(path, budget)
     except (OSError, UnicodeError) as exc:
         raise RecordError(f"cannot read worker result {path}: {exc}") from exc
     if not content.strip():
@@ -118,8 +145,8 @@ class ExecutionPlan:
     acceptance_criteria: tuple[AcceptanceCriterion, ...]
 
     @classmethod
-    def load(cls, path: Path, *, expected_run_id: str) -> "ExecutionPlan":
-        record = read_json_object(path)
+    def load(cls, path: Path, *, expected_run_id: str, budget: Budget | None = None) -> "ExecutionPlan":
+        record = read_json_object(path, budget=budget)
         version = _integer(record, "schema_version", minimum=1)
         if version != 1:
             raise RecordError(f"unsupported plan schema_version: {version}")
@@ -212,8 +239,9 @@ class Verdict:
         max_attempts: int,
         workspace: Path,
         expected_receipts: Sequence[tuple[Path, str]],
+        budget: Budget | None = None,
     ) -> "Verdict":
-        record = read_json_object(path)
+        record = read_json_object(path, budget=budget)
         version = _integer(record, "schema_version", minimum=1)
         if version != 2:
             raise RecordError(f"unsupported verdict schema_version: {version}")
@@ -241,6 +269,8 @@ class Verdict:
         artifacts: list[str] = []
         root = workspace.resolve()
         for item in raw_artifacts:
+            if budget is not None:
+                budget.check()
             relative = Path(item)
             if relative.is_absolute() or relative == Path("."):
                 raise RecordError(f"artifact must be a relative path: {item!r}")
@@ -275,7 +305,7 @@ class Verdict:
             if len(expected_receipts) < attempts:
                 raise RecordError("accepted verdict has no receipt definition for every attempt")
             receipts = [
-                WorkerReceipt.load(receipt_path, expected_token=token)
+                WorkerReceipt.load(receipt_path, expected_token=token, budget=budget)
                 for receipt_path, token in expected_receipts[:attempts]
             ]
             if receipts[-1].status != "ready_for_verification":
@@ -314,9 +344,9 @@ class WorkerReceipt:
     summary: str
 
     @classmethod
-    def load(cls, path: Path, *, expected_token: str) -> "WorkerReceipt":
+    def load(cls, path: Path, *, expected_token: str, budget: Budget | None = None) -> "WorkerReceipt":
         # token 将回执绑定到唯一 attempt，避免旧文件或其他会话被误认为本轮完成。
-        record = read_json_object(path)
+        record = read_json_object(path, budget=budget)
         if _integer(record, "schema_version", minimum=1) != 1:
             raise RecordError("unsupported worker receipt schema")
         token = _string(record, "token")
@@ -326,7 +356,7 @@ class WorkerReceipt:
         if status not in {"ready_for_verification", "blocked"}:
             raise RecordError("worker receipt has an unsupported status")
         # 回执是交接信号；完整结果必须已经落盘，包括 blocked 时的原因和已完成工作。
-        read_worker_result(path)
+        read_worker_result(path, budget=budget)
         return cls(token=token, status=status, summary=_string(record, "summary"))
 
     def to_json(self) -> JsonObject:

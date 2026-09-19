@@ -6,10 +6,13 @@ import difflib
 import re
 import threading
 import time
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Callable, Sequence
 
+from .errors import OperationError
+from .lifecycle import Budget
 from .tmux import DEFAULT_CAPTURE_HISTORY_LINES, HISTORY_LIMIT, TmuxError, TmuxSession
 
 type LogSink = Callable[[str, Sequence[str]], None]
@@ -142,8 +145,12 @@ class WorkerLogFollower:
         interval_seconds: float = DEFAULT_WORKER_LOG_INTERVAL_SECONDS,
         history_lines: int = DEFAULT_CAPTURE_HISTORY_LINES,
         max_lines_per_update: int = 12,
+        socket_path: Path | None = None,
+        budget: Budget | None = None,
     ) -> None:
         self.session_name = session_name
+        self.socket_path = socket_path
+        self.budget = budget
         self.agent = agent
         self.log_file = log_file
         self.sink = sink
@@ -165,36 +172,45 @@ class WorkerLogFollower:
         self._thread.start()
         return self
 
-    def stop(self) -> None:
+    @property
+    def is_alive(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    def stop(self, *, budget: Budget | None = None) -> None:
+        operation = budget or Budget(time.monotonic() + 5, "cleanup")
         self._stop.set()
-        if self._thread is not None:
-            self._thread.join(timeout=self.interval_seconds + 2.0)
-        # 不等待下个周期；结束时扩大到全部可保留历史，补采最后一次轮询之后的长输出。
+        if self._thread is not None and self._thread.ident is not None and self._thread is not threading.current_thread():
+            self._thread.join(timeout=max(0, min(0.2, operation.deadline - time.monotonic())))
         if not self._disabled:
             try:
-                self.sample_once(history_lines=HISTORY_LIMIT)
-            except OSError:
+                self.sample_once(history_lines=HISTORY_LIMIT, budget=operation)
+            except (OSError, OperationError):
                 pass
 
     def _loop(self) -> None:
         while not self._stop.is_set():
             try:
                 self.sample_once()
-            except OSError as exc:
+            except (OSError, OperationError) as exc:
                 # 可观测性故障不能改变任务结果，只报告一次并停止采集。
                 self._disabled = True
                 self.sink(self.agent, (f"[tmux 日志采集已停止：{exc}]",))
                 return
             self._stop.wait(self.interval_seconds)
 
-    def sample_once(self, *, history_lines: int | None = None) -> tuple[str, ...]:
-        with self._sample_lock:
-            return self._sample_once_locked(history_lines=history_lines)
+    def sample_once(self, *, history_lines: int | None = None, budget: Budget | None = None) -> tuple[str, ...]:
+        operation = budget or replace(self.budget or Budget(time.monotonic() + 30, "worker_run"), cancel_event=self._stop)
+        while not self._sample_lock.acquire(timeout=min(0.1, operation.remaining())):
+            operation.check()
+        try:
+            return self._sample_once_locked(history_lines=history_lines, budget=operation)
+        finally:
+            self._sample_lock.release()
 
-    def _sample_once_locked(self, *, history_lines: int | None = None) -> tuple[str, ...]:
+    def _sample_once_locked(self, *, history_lines: int | None = None, budget: Budget | None = None) -> tuple[str, ...]:
         if self._disabled:
             return ()
-        session = TmuxSession(self.session_name)
+        session = TmuxSession(self.session_name, socket_path=self.socket_path, budget=budget)
         try:
             if not session.exists():
                 return ()
@@ -210,21 +226,30 @@ class WorkerLogFollower:
             self._previous,
             current,
         )
-        self._previous = current
         if not changed:
+            self._previous = current
             return ()
-        self._append(changed)
+        self._append(changed, budget=budget)
+        self._previous = current
         displayed = _display_lines(changed, max_lines=self.max_lines_per_update)
         if displayed:
             self.sink(self.agent, displayed)
         return displayed
 
-    def _append(self, lines: Sequence[str]) -> None:
+    def _append(self, lines: Sequence[str], *, budget: Budget | None = None) -> None:
         self.log_file.parent.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now(UTC).isoformat()
         # SDK 会在 agent 选择前监听两个候选会话，共享锁保证日志块不会交错。
-        with _LOG_WRITE_LOCK, self.log_file.open("a", encoding="utf-8") as handle:
-            handle.write(f"[{timestamp}] {self.agent}\n")
-            for line in lines:
-                handle.write(f"| {line}\n")
-            handle.flush()
+        operation = budget or Budget(time.monotonic() + 30, "worker_run")
+        while not _LOG_WRITE_LOCK.acquire(timeout=min(0.1, operation.remaining())):
+            operation.check()
+        try:
+            operation.check()
+            with self.log_file.open("a", encoding="utf-8") as handle:
+                handle.write(f"[{timestamp}] {self.agent}\n")
+                for line in lines:
+                    operation.check()
+                    handle.write(f"| {line}\n")
+                handle.flush()
+        finally:
+            _LOG_WRITE_LOCK.release()

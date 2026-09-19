@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shlex
 import shutil
@@ -12,7 +13,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Pattern, Sequence
 
-from ..models import RecordError, WorkerReceipt, read_worker_result, worker_result_path
+from ..errors import OperationError
+from ..runtime import controller_settings
+from ..models import RecordError, WorkerReceipt, read_json_object, read_worker_result, worker_result_path
 from ..state import atomic_write_json
 from ..tmux import DEFAULT_CAPTURE_HISTORY_LINES, TmuxError, TmuxSession
 from ..supervision import SupervisionError, Supervisor
@@ -143,6 +146,7 @@ def build_parser(adapter: AgentAdapter) -> argparse.ArgumentParser:
     for name in ("status", "capture", "close"):
         command = commands.add_parser(name)
         command.add_argument("--session", required=True)
+        command.add_argument("--socket", type=Path, default=Path(os.environ["DSH_CONDUCTOR_SOCKET"]) if os.environ.get("DSH_CONDUCTOR_SOCKET") else None)
     capture = commands.choices["capture"]
     capture.add_argument("--history-lines", type=int, default=DEFAULT_CAPTURE_HISTORY_LINES)
 
@@ -200,7 +204,16 @@ def main(adapter: AgentAdapter, argv: Sequence[str] | None = None) -> int:
                 value = supervisor.stop(reason=args.reason)
             _emit(value)
             return 0
-        session = TmuxSession.attach(name=args.session, expected_agent=adapter.kind)
+        budget = None
+        runtime_file = None
+        if runtime_path := os.environ.get("DSH_CONDUCTOR_RUNTIME"):
+            runtime_file = Path(runtime_path)
+            request = read_json_object(runtime_file.parent / "request.json")
+            socket_path, budget, runtime_file = controller_settings(request, runtime_file.parent)
+            if args.socket != socket_path:
+                raise WorkerError("socket does not match the active run")
+        session = TmuxSession.attach(name=args.session, expected_agent=adapter.kind, socket_path=args.socket,
+                                     budget=budget, runtime_file=runtime_file)
         if args.command == "status":
             _emit({"schema_version": 1, **session.status().to_json()})
         elif args.command == "capture":
@@ -215,6 +228,6 @@ def main(adapter: AgentAdapter, argv: Sequence[str] | None = None) -> int:
             session.close()
             _emit({"schema_version": 1, "status": "closed", "session": args.session})
         return 0
-    except (WorkerError, SupervisionError, TmuxError, RecordError, OSError, ValueError) as exc:
+    except (WorkerError, SupervisionError, OperationError, RecordError, OSError, ValueError) as exc:
         print(f"{adapter.kind}_session: {exc}", file=sys.stderr)
         return 1

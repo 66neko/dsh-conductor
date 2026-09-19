@@ -206,9 +206,9 @@ def main() -> int:
         print(f"SDK 结果：{result_json}\n完整报告：{result.worker_result}\nworker 屏幕日志：{result.worker_log}", flush=True)
         print(f"监督状态与恢复记录：{result.state_directory / 'supervision.json'}\n{result.state_directory / 'supervision.jsonl'}", flush=True)
         if result.accepted:
-            print(f"观察会话：tmux attach -t {result.session}\n检查后关闭：tmux kill-session -t {result.session}", flush=True)
+            print(f"观察会话：{result.attach_command}\n检查后关闭：conductor cleanup --state-directory {result.state_directory}", flush=True)
         check_worker_result(result, stress_report=args.stress_report)
-        print("全部验证通过。工作区和 worker 会话已保留。", flush=True)
+        print(f"全部验证通过。工作区已保留；清理状态：{result.cleanup.status}。", flush=True)
         return 0
     except ConductorError as exc:
         (workspace / "quickstart-error.json").write_text(json.dumps(exc.to_json(), ensure_ascii=False, indent=2), encoding="utf-8")

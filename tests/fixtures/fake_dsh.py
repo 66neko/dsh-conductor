@@ -7,6 +7,9 @@ import json
 import os
 import re
 import sys
+import time
+import subprocess
+import signal
 from pathlib import Path
 
 
@@ -19,11 +22,21 @@ if os.environ.get("FAKE_DSH_EXIT_EARLY"):
     raise SystemExit(17)
 
 
+if os.environ.get("FAKE_DSH_IGNORE_TERM"):
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+
+if ready := os.environ.get("FAKE_DSH_READY_FILE"):
+    Path(ready).write_text(str(os.getpid()))
+
 for line in sys.stdin:
     request = json.loads(line)
     request_id = request["id"]
     method = request["method"]
     if method == "initialize":
+        time.sleep(float(os.environ.get("FAKE_DSH_INIT_DELAY", "0")))
+        if os.environ.get("FAKE_DSH_RPC_ERROR"):
+            emit({"jsonrpc": "2.0", "id": request_id, "error": {"code": -1, "message": "fixture RPC failure"}})
+            continue
         if (
             os.environ.get("FAKE_DSH_CHECK_PERMISSION")
             and os.environ.get("DSH_PERMISSION_MODE") != "danger-full-access"
@@ -41,7 +54,17 @@ for line in sys.stdin:
             emit({"jsonrpc": "2.0", "id": request_id, "error": {"code": -1, "message": "bad python path"}})
         else:
             emit({"jsonrpc": "2.0", "id": request_id, "result": {"ok": True}})
+        if os.environ.get("FAKE_DSH_FREEZE_STDIN"):
+            time.sleep(60)
     elif method == "session/prompt":
+        time.sleep(float(os.environ.get("FAKE_DSH_PROMPT_DELAY", "0")))
+        if os.environ.get("FAKE_DSH_EXIT_WITH_CHILD"):
+            child = subprocess.Popen([sys.executable, "-c", "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); print('child ready', flush=True); time.sleep(60)"], stdout=sys.stderr)
+            Path(os.environ["FAKE_DSH_CHILD_PID"]).write_text(str(child.pid))
+            time.sleep(0.1)
+            raise SystemExit(23)
+        if os.environ.get("FAKE_DSH_INVALID_FRAME"):
+            print("{invalid JSON", flush=True)
         if os.environ.get("FAKE_DSH_SDK"):
             prompt = (((request.get("params") or {}).get("contentBlocks") or [{}])[0]).get("text", "")
             request_match = re.search(r"`([^`]+/request\.json)`", prompt)
@@ -76,6 +99,24 @@ for line in sys.stdin:
                     "acceptance_criteria": [{"id": "criterion-1", "description": "fixture.txt exists"}],
                 }
                 Path(request_data["plan_file"]).write_text(json.dumps(plan), encoding="utf-8")
+                if os.environ.get("FAKE_DSH_WORKER"):
+                    from conductor.tmux import TmuxSession
+                    runtime_file = request_path.parent / "runtime.json"
+                    runtime = json.loads(runtime_file.read_text())
+                    command = [sys.executable, "-c", "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); signal.signal(signal.SIGHUP, signal.SIG_IGN); print('fixture worker evidence', flush=True); time.sleep(60)"]
+                    TmuxSession.create(name=selected["session"], workspace=workspace, agent=selected["agent"],
+                                       command=command, socket_path=Path(runtime["tmux_socket"]), runtime_file=runtime_file,
+                                       activity_file=request_path.parent / "worker-activity.json")
+                    if os.environ.get("FAKE_DSH_EXTRA_WORKER"):
+                        other = next(item for item in request_data["agents"] if item != selected)
+                        TmuxSession.create(name=other["session"], workspace=workspace, agent=other["agent"],
+                                           command=command, socket_path=Path(runtime["tmux_socket"]), runtime_file=runtime_file)
+                        time.sleep(0.1)  # 等待两个 worker 都安装忽略 HUP/TERM 的处理器。
+                    if marker := os.environ.get("FAKE_DSH_WORKER_READY"):
+                        Path(marker).write_text(selected["session"])
+                if os.environ.get("FAKE_DSH_HOLD_LOCK"):
+                    child = subprocess.Popen([sys.executable, "-c", "import fcntl,sys,time; f=open(sys.argv[1], 'a'); fcntl.flock(f, fcntl.LOCK_EX); print('locked', flush=True); time.sleep(60)", str(request_path.parent / "supervision.lock")], stdout=sys.stderr)
+                    time.sleep(0.1)
                 verdict = {
                     "schema_version": 2,
                     "run_id": request_data["run_id"],
@@ -120,7 +161,12 @@ for line in sys.stdin:
             "method": "session.status",
             "params": {"status": "idle"},
         }
+        if os.environ.get("FAKE_DSH_NO_TURN"):
+            continue
         emit(event)
+        if os.environ.get("FAKE_DSH_NO_IDLE"):
+            emit(turn_end)
+            break
         if os.environ.get("FAKE_DSH_ORDER") == "idle-first":
             emit(idle)
             emit(turn_end)

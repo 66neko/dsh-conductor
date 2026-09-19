@@ -8,6 +8,9 @@ import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Callable
+
+from .lifecycle import Budget
 
 from .models import AgentKind, JsonObject, worker_result_path
 
@@ -90,6 +93,8 @@ class RunState:
         keep_session: bool,
         max_recovery_attempts: int = 5,
         sdk_heartbeat_counts_as_activity: bool = True,
+        budget: Budget | None = None,
+        on_create: Callable[[str, Path], None] | None = None,
     ) -> "RunState":
         if not prompt.strip():
             raise ValueError("prompt must not be empty")
@@ -98,12 +103,18 @@ class RunState:
         run_id = f"{timestamp}-{random_id}"
         # 每次运行创建不可复用的新目录，从路径层面隔离旧 plan、verdict 与 receipt。
         root = state_root.expanduser().resolve() / "runs" / run_id
+        if budget is not None:
+            budget.check()
         root.mkdir(parents=True, exist_ok=False)
+        if on_create is not None:
+            on_create(run_id, root)
 
         agent_states: list[AgentState] = []
         for kind in AgentKind:
             attempts: list[AttemptState] = []
             for number in range(1, max_attempts + 1):
+                if budget is not None:
+                    budget.check()
                 attempt_root = root / "attempts" / kind.value / str(number)
                 attempt_root.mkdir(parents=True)
                 attempts.append(

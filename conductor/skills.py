@@ -12,6 +12,7 @@ from pathlib import Path
 
 from .dsh import DshError
 from .models import AgentKind
+from .lifecycle import Budget
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -60,7 +61,7 @@ def _remove_path(path: Path) -> None:
         shutil.rmtree(path)
 
 
-def prepare_workspace_skills(workspace: Path) -> Path:
+def prepare_workspace_skills(workspace: Path, *, budget: Budget | None = None) -> Path:
     """把随包 skill 直接覆盖到 workspace 的项目级目录并返回该目录。"""
 
     root = workspace_skill_root(workspace)
@@ -68,10 +69,16 @@ def prepare_workspace_skills(workspace: Path) -> Path:
     # 先解析全部源目录，避免中途缺文件时只覆盖了一部分 skill。
     sources = {kind: source_skill(kind) for kind in AgentKind}
     for kind, source in sources.items():
+        if budget is not None:
+            budget.check()
         target = root / kind.skill_name
         # 直接删除旧版本，避免源目录删掉文件后目标残留旧内容。
         _remove_path(target)
-        shutil.copytree(source, target)
+        def copy_file(src: str, dst: str) -> str:
+            if budget is not None:
+                budget.check()
+            return shutil.copy2(src, dst)
+        shutil.copytree(source, target, copy_function=copy_file)
     return root
 
 

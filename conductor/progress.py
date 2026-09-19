@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Callable, Sequence
 
 from .state import atomic_write_json
+from .lifecycle import Budget
 
 type JsonObject = dict[str, Any]
 type EventCallback = Callable[["RunEvent"], None]
@@ -77,6 +78,7 @@ class ProgressReporter:
         heartbeat_seconds: float = 10.0,
         heartbeat_file: Path | None = None,
         supervision_log: Path | None = None,
+        max_pending_events: int = 1024,
     ) -> None:
         self.on_event = on_event
         self.heartbeat_seconds = heartbeat_seconds
@@ -92,7 +94,11 @@ class ProgressReporter:
         self._lock = threading.Lock()
         self._heartbeat_thread: threading.Thread | None = None
         self._dispatch_thread: threading.Thread | None = None
-        self._events: queue.Queue[RunEvent | object] = queue.Queue()
+        self._events: queue.Queue[RunEvent | object] = queue.Queue(maxsize=max_pending_events)
+        self._dispatch_stop = threading.Event()
+        self._closed = False
+        self.dropped_events = 0
+        self.callback_inflight = False
 
     def start(self) -> "ProgressReporter":
         self._started = time.monotonic()
@@ -113,14 +119,41 @@ class ProgressReporter:
             self._heartbeat_thread.start()
         return self
 
-    def stop(self) -> None:
+    def stop(self, *, budget: Budget | None = None) -> None:
+        deadline = budget.deadline if budget else time.monotonic() + 2
+        self._closed = True
         self._stop.set()
-        if self._heartbeat_thread is not None:
-            self._heartbeat_thread.join(timeout=2)
-        self.read_supervision()
-        if self._dispatch_thread is not None:
-            self._events.put(_STOP)
-            self._dispatch_thread.join(timeout=2)
+        if self._heartbeat_thread is not None and self._heartbeat_thread.ident is not None and self._heartbeat_thread is not threading.current_thread():
+            self._heartbeat_thread.join(timeout=max(0, min(0.2, deadline - time.monotonic())))
+        # 不在主线程等待可能正在读文件的 journal 锁。
+        if self._dispatch_thread is not None and self._dispatch_thread.ident is not None and self._dispatch_thread is not threading.current_thread():
+            self._enqueue(_STOP)
+            self._dispatch_thread.join(timeout=max(0, min(0.2, deadline - time.monotonic())))
+        self._dispatch_stop.set()
+        while True:
+            try:
+                event = self._events.get_nowait()
+                self.dropped_events += event is not _STOP
+            except queue.Empty:
+                break
+
+    @property
+    def heartbeat_alive(self) -> bool:
+        return self._heartbeat_thread is not None and self._heartbeat_thread.is_alive()
+
+    def _enqueue(self, event: RunEvent | object) -> None:
+        try:
+            self._events.put_nowait(event)
+        except queue.Full:
+            try:
+                self._events.get_nowait()
+                self.dropped_events += 1
+            except queue.Empty:
+                pass
+            try:
+                self._events.put_nowait(event)
+            except queue.Full:
+                self.dropped_events += 1
 
     def emit(
         self,
@@ -130,8 +163,13 @@ class ProgressReporter:
         message: str,
         raw: JsonObject | None = None,
     ) -> None:
+        if self._closed:
+            return
         if kind == "heartbeat" and self.heartbeat_file is not None:
-            atomic_write_json(self.heartbeat_file, {"last_output_at": time.time()})
+            try:
+                atomic_write_json(self.heartbeat_file, {"last_output_at": time.time()})
+            except OSError:
+                return
         with self._lock:
             event = RunEvent(
                 elapsed_seconds=time.monotonic() - self._started,
@@ -143,17 +181,19 @@ class ProgressReporter:
             self._last_output = time.monotonic()
         # DSH 协议线程只入队，用户回调的耗时不会阻塞后续 JSON-RPC 帧。
         if self.on_event is not None:
-            self._events.put(event)
+            self._enqueue(event)
 
     def read_supervision(self) -> None:
         """转发审计事件；不采集屏幕，不改变 worker 活动时间。"""
         if self.supervision_log is None:
             return
-        with self._journal_lock:
+        if not self._journal_lock.acquire(blocking=False):
+            return
+        try:
             try:
                 with self.supervision_log.open(encoding="utf-8") as handle:
                     handle.seek(self._journal_offset)
-                    while line := handle.readline():
+                    while not self._closed and (line := handle.readline()):
                         if not line.endswith("\n"):
                             break
                         self._journal_offset = handle.tell()
@@ -171,18 +211,26 @@ class ProgressReporter:
             except OSError:
                 # 展示故障不影响持久化监督状态与 DSH 判定。
                 return
+        finally:
+            self._journal_lock.release()
 
     def _dispatch_events(self) -> None:
-        while True:
-            event = self._events.get()
-            if event is _STOP:
+        while not self._dispatch_stop.is_set():
+            try:
+                event = self._events.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if event is _STOP or self._dispatch_stop.is_set():
                 return
             assert isinstance(event, RunEvent)
             try:
+                self.callback_inflight = True
                 self.on_event(event)
             except Exception:
                 # 可观测性回调不能中断任务执行或破坏 DSH 协议线程。
                 pass
+            finally:
+                self.callback_inflight = False
 
     def worker_lines(self, agent: str, lines: Sequence[str]) -> None:
         for line in lines:

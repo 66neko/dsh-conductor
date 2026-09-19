@@ -8,6 +8,10 @@ description: 在 tmux 中监督 Codex，提交任务、观察活动与回执、�
 通过 Python 3.13 运行 `scripts/codex_session.py`，使用 `--dangerously-bypass-approvals-and-sandbox --no-alt-screen` 启动 worker。
 只控制 request/plan 指定的本 agent 会话和工作区，所有返工沿用该会话。不得改用另一 agent。
 会话名精确匹配，读屏与输入绑定启动时的 worker pane；切换观察窗口不会改变控制目标。
+本轮使用 SDK 创建的私有 tmux socket，run/send/watch/recover/choose/stop 根据 --request
+读取同目录 runtime.json；不得自行连接默认 socket 或启动另一服务器。status/capture/close
+使用注入的 DSH_CONDUCTOR_SOCKET；手动执行时须传 --socket /tmp/dshc-.../tmux.sock。
+调用方观察会话应使用 SDK 返回的 attach_command。
 
 ## 委派与文件交接
 
@@ -41,7 +45,10 @@ python3.13 <skill>/scripts/codex_session.py watch \
   --request /absolute/run/request.json --session dsh-codex-unique --wait-seconds 60
 ```
 
-watch 每 10 秒检查一次，单次最多等待 300 秒；工具执行超时应大于等待时间至少 30 秒。
+watch 每 10 秒检查一次，单次最多等待 300 秒，且所有命令受本轮剩余执行时间限制。
+工具执行超时应覆盖实际等待和命令开销；不得借新 watch、恢复或返工延长 SDK 截止时间。
+等待和文件锁每约 100ms 检查截止时间/停止标记。sdk-stop.json 出现后不得继续派发、选择或恢复；
+SDK 已接管清理。runtime.json 的 monotonic 截止时间只在本轮同一 boot 内有效，不用于跨重启恢复。
 同步调用，不转入长期后台 `job_output` 等待。每次返回后先检查 status、当前屏幕、快照和实际文件：
 
 | status | 管理者下一步 |
@@ -114,9 +121,11 @@ python3.13 <skill>/scripts/codex_session.py capture --session dsh-codex-unique -
 python3.13 <skill>/scripts/codex_session.py status --session dsh-codex-unique
 ```
 
-stop 先保存最多 50000 行历史，再停止会话，留下审计记录。失败时先 stop 再写 rejected verdict，
+stop 在剩余预算内先保存最多 50000 行历史，再停止会话，留下审计记录。失败时先 stop 再写 rejected verdict，
 没有 receipt 不妨碍失败结论。正常验收后保留会话给 SDK 补采，再由 SDK 按 keep_session 配置清理；
-失败和总超时必须停止 worker，即使 keep_session=true，诊断文件仍保留。
+只有 accepted 且 keep_session=true 才允许保留 worker。rejected、取消、失败和总超时必须停止
+worker，即使 keep_session=true，诊断文件仍保留。SDK 会核验清理并返回 cleanup 报告；
+cleanup_run/CLI cleanup 用于 SDK 结束后回收资源，不代表重新执行或重新验收任务。
 
 capture 默认读取当前屏幕及最近 5000 行历史，`--history-lines 0` 只看当前屏幕；历史上限 50000。
 Codex 的 --no-alt-screen 有助于保留历史，但重绘与历史容量仍可能造成遗漏。长文完整性由 result.md 及引用文件保障，屏幕仅用于状态和诊断。

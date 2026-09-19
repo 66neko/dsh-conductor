@@ -158,6 +158,10 @@ def build_prompt(
 本次运行身份记录在 `{state.request_file}`，用户的唯一输入 prompt 位于
 `{state.user_prompt_file}`，工作区是 `{state.workspace}`，不可变 run id 是 `{state.run_id}`。
 先读取 request 与用户 prompt，再执行以下流程。当前环境可用的 worker 是：{availability}。
+本轮资源上下文在 request 同目录的 runtime.json；控制器通过 --request 自动读取私有 tmux socket
+和本轮执行截止时间。不得连接默认 socket 或自行创建另一服务器。独立 status/capture/close 命令
+使用注入的 DSH_CONDUCTOR_SOCKET，手动执行时传 --socket。sdk-stop.json 出现后不得继续启动、
+提交或恢复工作。初始化、执行、验收和清理共用 SDK 总预算；新 watch 或返工不延长截止时间。
 
 ## 1. 拆解 prompt 并选择 worker
 
@@ -185,7 +189,7 @@ result.md；重要内容及时落盘，长检查输出另存本轮目录的文�
 worker 必须在最终结果文件原子落盘后才写 receipt，不能把关键内容只留在终端。
 
 run/send 只登记本轮任务并立即返回，不能把命令返回视为 worker 完成。随后持续调用 watch，
-每次最多等待 300 秒（执行工具超时应设置为至少 330 秒）。不要把命令转入长期后台 job_output
+每次最多等待 300 秒，且不得超过本轮剩余执行时间（工具超时应覆盖实际等待及命令开销）。不要把命令转入长期后台 job_output
 等待；watch 返回 starting/submitting/running 时检查状态后继续 watch，不能重复 run/send。
 watch 在就绪后自动提交已登记的任务。Codex 的 submitting 只表示正在确认输入，不能认定任务已执行。
 Codex 先用 bracketed paste 粘贴，读屏确认草稿后才发送 Enter，观察输入框清空后才返回 running。
@@ -248,7 +252,7 @@ verdict 的 `agent` 必须与 plan 一致；`checks` 必须且只能覆盖 plan 
 验证所有 check 均通过时才能写 accepted。rejected 必须包含非空 `remaining_issues`。
 `artifacts` 只能使用工作区内的相对路径，`attempts` 是实际提交给 worker 的轮数。
 
-rejected 前必须 stop；keep_session 只允许保留正常验收结束的会话。全局超时由 SDK 停止 worker 并保留诊断文件。
+rejected 前必须 stop；keep_session 只允许保留 accepted 的会话。全局超时由 SDK 停止 worker 并保留诊断文件。
 正常验收结束时：{close_instruction}
 最后输出一段简短总结，但调用方只以 plan、receipt、DSH 协议完成事件和 verdict 文件为事实。
 """

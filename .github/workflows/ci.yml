@@ -18,6 +18,8 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.13"
+      - name: 安装 tmux
+        run: sudo apt-get update && sudo apt-get install -y tmux
       - name: 运行测试
         run: python -m unittest discover -v
       - name: 编译检查
@@ -33,6 +35,7 @@ jobs:
           TEST_ENV="$RUNNER_TEMP/dsh-conductor-wheel-env"
           python -m venv "$TEST_ENV"
           "$TEST_ENV/bin/python" -m pip install --no-deps dist/*.whl
+          cd "$RUNNER_TEMP"
           "$TEST_ENV/bin/python" - <<'PY'
           from pathlib import Path
           from tempfile import TemporaryDirectory

@@ -4,7 +4,7 @@
 
 ```text
 Python 调用方
-   │ workspace + prompt + on_event
+   │ workspace + prompt + on_event + cancel_event
    ▼
 Conductor SDK ── JSON-RPC/stdio ──► DSH manager
    │                                  │
@@ -20,7 +20,7 @@ Conductor SDK ── JSON-RPC/stdio ──► DSH manager
 
 ## SDK 边界
 
-`Conductor(workspace, config).run(prompt, on_event)` 是唯一高层入口。prompt 同时承载任务描述、验收标准和可选的 agent 偏好。DSH 必须服从 prompt 中明确的 Claude Code/Codex 选择；未指定时只能从当前可用 agent 中选择一个。SDK 不接受 `agent` 参数，也不从自然语言回复猜测选择结果。
+`Conductor(workspace, config).run(prompt, on_event, *, cancel_event=None)` 是唯一高层入口。prompt 同时承载任务描述、验收标准和可选的 agent 偏好。DSH 必须服从 prompt 中明确的 Claude Code/Codex 选择；未指定时只能从当前可用 agent 中选择一个。SDK 不接受 `agent` 参数，也不从自然语言回复猜测选择结果。
 
 `RunEvent` 是只读进度事件，包含相对耗时、来源、类型、可读消息和可选原始协议事件。DSH 事件和 worker 屏幕事件通过同一个回调串行交付。回调异常会被隔离，不能改变任务结果。
 
@@ -29,6 +29,9 @@ Conductor SDK ── JSON-RPC/stdio ──► DSH manager
 每次运行创建新的 `runs/<run-id>/`：
 
 ```text
+runtime.json          # 资源身份、同 boot 的临时截止时间和清理报告
+resources/            # DSH、tmux、worker、辅助命令的进程身份
+run.lock              # 活动运行与恢复清理互斥
 request.json          # 运行身份、两个候选 agent 和所有事实路径
 user-prompt.md        # 调用方原始 prompt
 manager-prompt.md     # 发给 DSH 的完整中文编排契约
@@ -40,7 +43,7 @@ supervision.jsonl     # DSH 观察、选择、恢复、停止的审计记录
 worker-activity.json  # pipe-pane 原始输出字节计数和时间
 sdk-heartbeat.json    # 默认计入活动的 SDK 心跳时间
 observations/         # 需要判断时的屏幕快照与 stop 的末次历史
-sdk-stop.json         # SDK 失败/总超时的兜底结束标记
+sdk-stop.json         # SDK 进入清理后的结束标记
 sdk-stop-<agent>.txt  # SDK 结束前的历史快照
 attempts/<agent>/<n>/
   task.md
@@ -89,7 +92,7 @@ max_attempts 控制，只有已交接任务才可进入下一轮。历史错误�
 不可恢复失败或额度耗尽：stop 保存最终最多 50000 行并终止 worker，再由 DSH 写 rejected，
 无需 receipt。SDK 在 rejected、异常、总超时后也会检查候选会话身份、保存历史并停止 worker，
 即使 keep_session=true；sdk-stop.json 阻止遗留 watch/recover 继续操作。SDK 不伪造验收结论，
-协议未完成或总超时仍返回 ConductorError。timeout_seconds 默认 3600，不因活动或恢复重置。
+协议未完成或总超时仍返回 ConductorError。timeout_seconds 默认 3600，覆盖整个 run（包括初始化与清理），不因活动或恢复重置。
 
 ## 两个独立 skill
 
@@ -104,7 +107,7 @@ SDK 启动时为 Claude 和 Codex 两个候选会话各创建一个只读 `Worke
 限制为最后 12 行。大段重复历史采用有界比较并保存完整变化区域，可能带有重复上下文，避免结束补采时耗费过多时间。不存在的会话不会产生事件。两个 skill 的 `capture` 默认也读取 5000 行历史，
 可通过 `--history-lines` 调整；菜单和就绪识别仍只读取当前屏幕。
 
-周期采集与屏幕刷新无关，仅在内容变化时输出日志事件。停止时立即补采最多 50000 行历史，
+周期采集与屏幕刷新无关，仅在内容变化时输出日志事件。停止时在清理剩余预算内补采最多 50000 行历史，
 不等待下个周期。DSH 写入 verdict 后保留会话；SDK 完成补采并验证结果后，才在
 `keep_session=False` 时关闭所选会话，关闭前核对 agent 与工作区元数据。失败由 stop 或 SDK 先保存
 历史快照再关闭会话，保留文件证据；不再让异常 worker 继续运行。
@@ -117,3 +120,22 @@ tmux 先创建占位窗口，在本会话设置 `history-limit=50000` 后再创�
 Codex 使用 `--no-alt-screen`，通常可以看到最近滚动内容；Claude Code 使用备用屏幕或原地重绘
 时，历史仍可能不可恢复。扩大范围不能保证完整记录终端输出；完整内容通过 `result.md` 及其
 引用文件交付，tmux 只提供运行状态和诊断信息。采集竞态或采集失败不会改变 DSH 结果。
+
+
+## 生命周期与资源所有权
+
+`lifecycle.py` 提供每轮 RunContext、共享截止时间和可取消等待；`errors.py` 定义稳定的
+错误码协议。预算从 run 入口开始，清理阶段不再检查调用方取消事件。首次终止原因保留。
+DSH 使用无缓冲、非阻塞管道与 selectors；协议读写、初始化和关闭不会等待无限的管道 EOF。
+只有合法 turn/end 和 idle 同时成立才完成，非法 JSON 帧立即成为协议错误。
+
+每个 run 使用 `/tmp/dshc-*/tmux.sock` 私有服务器。DSH 与 worker 分别具有登记的进程身份；
+进程启动时间、UID、boot ID 和 session/进程组用于防止 PID 复用时误杀。清理先停止管理者，
+再回收 worker 与辅助资源，并核验资源是否存活。不能确认归属或退出时报告 incomplete。
+同一工作区使用独立于 state_dir 的 workspace.lock 拒绝重入，避免复制 skill 与任务编辑竞争。
+
+runtime.json 与 resources 是可变运行元数据，request/plan/receipt/verdict 保持审计用途。
+cleanup_run 取得 run.lock 后可以在 SDK 崩溃后回收已登记资源；活动运行不能被该接口接管。
+持久化 monotonic 截止时间只供同一次启动、同一 boot 的控制器使用，恢复清理不复用它。
+保留 worker 只适用于 accepted + keep_session；后续观察使用包含 socket 的 attach_command。
+详细契约和无法回收的边界见 [运行生命周期](lifecycle.md)。

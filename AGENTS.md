@@ -7,6 +7,10 @@
 | 模块 | 职责 |
 |---|---|
 | `conductor/sdk.py` | `Conductor`、配置、事件回调、运行生命周期和 `TaskResult` |
+| `conductor/errors.py` | 错误码、阶段、原因链与兼容错误 JSON |
+| `conductor/lifecycle.py` | 可取消等待、共享截止时间、工作区锁和有限子进程调用 |
+| `conductor/runtime.py` | 私有 socket、资源元数据、清理报告与 `cleanup_run` |
+| `conductor/processes.py` | Linux 进程启动身份、受管 session/组核验与终止 |
 | `conductor/cli.py` | CLI 参数、stderr 事件渲染、JSON stdout、doctor/install/show |
 | `conductor/dsh.py` | `dsh --profile sdk` JSON-RPC/stdio 客户端 |
 | `conductor/state.py` | 运行目录、候选 agent 会话、attempt 和 receipt 路径 |
@@ -36,6 +40,9 @@
 11. `project/` 是用户目录，除非用户明确要求，不修改、不删除、不提交。
 12. 默认活动静默阈值 300 秒；任何 worker 输出/变化及 SDK 心跳计入活动。SDK 心跳可显式排除；持续心跳时静默检测不会触发，DSH 仍须检查周期返回的屏幕。
 13. 主动恢复和重复卡住的菜单共用全 run 最多 5 次预算，不随 watch 或业务返工清零；首次普通选择免费。失败和总超时停止 worker，保留证据。
+14. `timeout_seconds` 覆盖整个 run，清理预留 `min(cleanup_timeout_seconds, timeout_seconds * 0.1)`；阶段等待不得增加总预算。清理忽略调用方取消事件，保留首次执行错误。
+15. 每个 SDK run 使用私有 tmux socket 和资源启动身份，不能对默认 server 或裸 PID 执行恢复清理。只有 accepted + keep_session 可保留 worker；清理状态必须可核验。
+16. 同一 workspace 拒绝重叠 run。SDK 不改宿主信号处理器；CLI 在主线程临时处理 SIGINT/SIGTERM，清理后输出一个 JSON 并恢复处理器。
 
 ## 常用命令
 
