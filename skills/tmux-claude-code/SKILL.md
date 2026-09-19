@@ -44,6 +44,7 @@ watch 每 10 秒检查一次，单次最多等待 300 秒；工具执行超时�
 
 | status | 管理者下一步 |
 |---|---|
+| `starting` | 尚在启动或等待输入界面就绪，继续 watch，不重复 run/send |
 | `running` | 检查返回的屏幕和 observation，任务继续则再次 watch；已停在输入框却无文件则诊断、补交 |
 | `needs_attention` | 根据 reason、屏幕和 snapshot_file 决定观察、选择、恢复或结束 |
 | `receipt_ready` | 有效 token 回执与结果文件已就绪，读取文件并独立验收；blocked 表示报告阻塞 |

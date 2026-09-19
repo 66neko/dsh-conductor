@@ -5,11 +5,33 @@ import tempfile
 import json
 import time
 from pathlib import Path
+from unittest import mock
 
 from conductor.progress import ProgressReporter, RunEvent
 
 
 class ProgressTests(unittest.TestCase):
+    def test_tool_wait_duration_remains_distinct_from_worker_output_activity(self) -> None:
+        now = 100.0
+        with mock.patch('conductor.progress.time.monotonic', side_effect=lambda: now):
+            reporter = ProgressReporter(on_event=lambda event: None)
+            reporter({'type': 'tool/call', 'data': {'name': 'bash'}})
+            now += 152
+            with mock.patch.object(reporter._stop, 'wait', side_effect=[False, True]):
+                reporter._heartbeat()
+            now += 20
+            reporter.worker_lines('codex', ('检查全部通过',))
+            self.assertEqual(reporter._last_output, now)
+            now += 10
+            with mock.patch.object(reporter._stop, 'wait', side_effect=[False, True]):
+                reporter._heartbeat()
+            events = [reporter._events.get_nowait() for _ in range(4)]
+        self.assertEqual([event.kind for event in events],
+                         ['tool_call', 'heartbeat', 'worker_output', 'heartbeat'])
+        self.assertEqual(events[1].raw['tool_elapsed_seconds'], 152)
+        self.assertEqual(events[3].raw['tool_elapsed_seconds'], 182)
+        self.assertNotIn('silence_seconds', events[3].raw)
+
     def test_heartbeat_activity_is_persisted_without_display_callback(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'sdk-heartbeat.json'

@@ -131,11 +131,34 @@ class Supervisor:
         return {
             "schema_version": 1, "run_id": state["run_id"], "agent": state["agent"],
             "session": state["session"], "status": status, "attempt": state["attempt"],
+            "phase": state["phase"],
             "recoveries": state["recoveries"], "max_recoveries": self.request.get("max_recovery_attempts", 5),
             "receipt_file": attempt.get("receipt_file"), "result_file": attempt.get("result_file"),
             "silence_seconds": round(max(0, time.time() - state.get("last_activity_at", time.time())), 1),
             **extra,
         }
+
+    def current_screen(self, session: TmuxSession) -> str:
+        # Codex 的输入框定位依赖真实屏幕行号，不能合并终端自动折行。
+        return session.capture(join_wrapped=not self.adapter.confirm_submission)
+
+    def dispatch(self, state: JsonObject, session: TmuxSession, text: str) -> None:
+        # 在任何输入副作用前保存阶段，控制器中断后不得重放整段任务。
+        state.update(observation=None, acknowledged=None)
+        if self.adapter.confirm_submission:
+            state.update(phase="submitting", submission_stage="paste_started",
+                         submission_started_at=time.time(), submission_enter_at=None)
+            self.save(state)
+            session.send_text(text, submit=False)
+            state["submission_stage"] = "paste_sent"
+            self.record(state, "task_pasted", message="已粘贴，等待确认输入框后发送 Enter")
+        else:
+            state["phase"] = "running"
+            self.save(state)
+            session.send_text(text)
+            self.record(state, "task_sent", message="任务已提交到 worker")
+        state["last_activity_at"] = time.time()
+        self.save(state)
 
     def snapshot(self, state: JsonObject, screen: str, reason: str) -> JsonObject:
         identity = fingerprint(screen)
@@ -150,7 +173,16 @@ class Supervisor:
         path.write_text(history, encoding="utf-8")
         observation = {"id": number, "reason": reason, "screen_hash": identity, "snapshot_file": str(path)}
         state.update(observation=observation, observation_number=number)
-        self.record(state, "needs_attention" if reason not in {"stopped", "review"} else "snapshot", message=reason, **observation)
+        silence = round(max(0, time.time() - state.get("last_activity_at", time.time())), 1)
+        idle_timeout = self.request.get("worker_idle_timeout_seconds", 300)
+        message = reason
+        if reason == "review":
+            message = f"watch 单次等待结束，交回 DSH 检查；距最近活动 {silence:g}s（静默阈值 {idle_timeout:g}s）"
+        elif reason == "silent":
+            message = f"连续 {silence:g}s 无活动，达到静默阈值 {idle_timeout:g}s，交回 DSH 判断"
+        self.record(state, "needs_attention" if reason not in {"stopped", "review"} else "snapshot",
+                    message=message, **observation, silence_seconds=silence,
+                    worker_idle_timeout_seconds=idle_timeout, last_activity_at=state.get("last_activity_at"))
         return observation
 
     def poll(self) -> JsonObject:
@@ -171,7 +203,7 @@ class Supervisor:
                     receipt_error = str(exc)
             try:
                 session = self.attached()
-                screen = session.capture()
+                screen = self.current_screen(session)
                 activity_status = session.activity_status()
                 activity = read_json_object(self.activity_file)
                 if (type(activity.get("bytes")) is not int or activity["bytes"] < 0
@@ -199,6 +231,8 @@ class Supervisor:
                 state["last_activity_at"] = now
             state.update(last_screen=signature, last_bytes=activity["bytes"])
             state["last_activity_at"] = max(state["last_activity_at"], min(now, heartbeat_at))
+            submission_status = self.adapter.submission_status(screen, activity_status)
+            pending = self.adapter.has_pending_submission(screen, activity_status)
             reason = None
             if dead:
                 reason = "worker_exited"
@@ -206,26 +240,41 @@ class Supervisor:
                 reason = "monitor_error"
             elif receipt_error:
                 reason = "invalid_receipt"
-            elif self.adapter.is_menu(screen) or self.adapter.has_pending_submission(screen):
+            elif self.adapter.is_menu(screen):
                 reason = "input_required"
-            elif (self.adapter.error_hint.search(screen)
-                  and state.get("acknowledged") != self.attention_key("worker_error", screen)):
+            elif state["phase"] == "submitting":
+                stage = state["submission_stage"]
+                if pending and stage in {"paste_started", "paste_sent"}:
+                    # 已观察到草稿才发第一次 Enter。先持久化，崩溃后不能盲目补发。
+                    state.update(submission_stage="enter_sent", submission_enter_at=now)
+                    self.save(state)
+                    session.send_keys("Enter")
+                    self.record(state, "submit_key", message="已发送 Enter，等待输入框清空确认")
+                elif stage == "enter_sent" and submission_status == "empty":
+                    state["phase"] = "running"
+                    self.record(state, "task_sent", message="已确认 Codex 接收输入；完成仍需有效回执")
+                elif pending and now - state["submission_enter_at"] >= 2:
+                    reason = "submission_pending"
+                elif now - state["submission_started_at"] >= 30:
+                    reason = "submission_unconfirmed"
+            elif pending:
+                reason = "submission_pending" if self.adapter.confirm_submission else "input_required"
+            # 输入确认优先于活动检测，心跳、spinner 或光标变化不能证明已提交。
+            if (reason is None and state["phase"] != "submitting"
+                    and self.adapter.error_hint.search(screen)
+                    and state.get("acknowledged") != self.attention_key("worker_error", screen)):
                 reason = "worker_error"
-            elif (now - state["last_activity_at"] >= self.request.get("worker_idle_timeout_seconds", 300)
+            elif (reason is None and state["phase"] != "submitting"
+                  and now - state["last_activity_at"] >= self.request.get("worker_idle_timeout_seconds", 300)
                   and now >= state.get("observe_until", 0)):
                 reason = "silent"
             if (state["phase"] == "starting" and reason is None and self.adapter.is_ready(screen)
+                    and (not self.adapter.confirm_submission or submission_status == "empty")
                     and not self.adapter.busy_hint.search(screen)):
                 if state["ready_since"] is None:
                     state["ready_since"] = now
                 elif now - state["ready_since"] >= 2:
-                    # 先保存派发意图；粘贴后进程中断时，后续 watch 不能自动重复提交。
-                    # 未收到回执的任务由 DSH 观察后显式 recover，仍受恢复预算约束。
-                    state.update(phase="running", last_activity_at=now)
-                    self.save(state)
-                    session.send_text(state["submission"])
-                    state.update(phase="running", last_activity_at=time.time())
-                    self.record(state, "task_sent", message="任务已提交到 worker")
+                    self.dispatch(state, session, state["submission"])
             elif state["phase"] == "starting":
                 state["ready_since"] = None
             # DSH 可以明确选择继续观察同一错误；仍受静默阈值和全局时限约束。
@@ -239,7 +288,7 @@ class Supervisor:
             if not self.adapter.error_hint.search(screen):
                 state["acknowledged"] = None
             self.save(state)
-            return self.response(state, "running")
+            return self.response(state, state["phase"] if state["phase"] in {"starting", "submitting"} else "running")
 
     def attention_key(self, reason: str | None, screen: str) -> str:
         if reason == "worker_error":
@@ -264,17 +313,17 @@ class Supervisor:
         while True:
             result = self.poll()
             remaining = deadline - time.monotonic()
-            if result["status"] != "running":
+            if result["status"] not in {"starting", "submitting", "running"}:
                 return result
             if remaining <= 0:
                 # 即使 SDK 心跳持续活动，也周期性交回可供 DSH 判断的屏幕证据。
                 with self.locked() as state:
                     if state["phase"] == "stopped":
                         return self.response(state, "stopped")
-                    screen = self.attached().capture()
+                    screen = self.current_screen(self.attached())
                     observation = self.snapshot(state, screen, "review")
                     self.save(state)
-                    return self.response(state, "running", **observation,
+                    return self.response(state, result["status"], **observation,
                                          screen=re.sub(r"\b[a-f0-9]{48}\b", "[token]", screen[-4000:]))
             time.sleep(min(10, remaining))
 
@@ -310,9 +359,14 @@ class Supervisor:
         with self.locked() as state:
             self.check_observation(state, observation)
             session = self.attached()
-            screen = session.capture()
-            if self.adapter.is_menu(screen) or self.adapter.has_pending_submission(screen):
+            screen = self.current_screen(session)
+            activity_status = session.activity_status()
+            if self.adapter.is_menu(screen) or self.adapter.has_pending_submission(screen, activity_status):
                 raise SupervisionError("worker is waiting for a choice; use choose")
+            if (self.adapter.confirm_submission
+                    and self.adapter.submission_status(screen, activity_status) != "empty"
+                    and not interrupt):
+                raise SupervisionError("cannot confirm an empty composer; inspect before recovering")
             if not interrupt and (not self.adapter.is_ready(screen) or self.adapter.busy_hint.search(screen)):
                 raise SupervisionError("worker is still busy; explicitly interrupt or keep watching")
             self.charge(state)
@@ -320,9 +374,11 @@ class Supervisor:
             if interrupt:
                 session.send_keys("C-c")
                 time.sleep(1)
-                screen = session.capture()
+                screen = self.current_screen(session)
                 if (self.adapter.is_menu(screen) or not self.adapter.is_ready(screen)
-                        or self.adapter.busy_hint.search(screen)):
+                        or self.adapter.busy_hint.search(screen)
+                        or (self.adapter.confirm_submission
+                            and self.adapter.submission_status(screen, session.activity_status()) != "empty")):
                     raise SupervisionError("worker is not ready after interrupt; watch again")
             self.check_receipt(state)
             attempt = self.attempt(state)
@@ -330,8 +386,8 @@ class Supervisor:
             if receipt.exists():
                 # 保留错误回执证据，由 worker 重新生成；DSH 不代签。
                 receipt.rename(receipt.with_name(f"receipt.invalid-{state['recoveries']}.json"))
-            session.send_text(instruction + "\n\n" + state["submission"])
-            state.update(phase="running", last_activity_at=time.time(), observation=None, acknowledged=None)
+            self.dispatch(state, session, instruction + "\n\n" + state["submission"])
+            state.update(observation=None, acknowledged=None)
             self.save(state)
             return self.response(state, "recovering")
 
@@ -342,19 +398,25 @@ class Supervisor:
         with self.locked() as state:
             self.check_observation(state, observation)
             session = self.attached()
-            screen = session.capture()
+            screen = self.current_screen(session)
             if fingerprint(screen) != state["observation"]["screen_hash"]:
                 raise SupervisionError("menu changed; watch again before choosing")
-            if not (self.adapter.is_menu(screen) or self.adapter.has_pending_submission(screen)):
+            pending = not self.adapter.is_menu(screen) and self.adapter.has_pending_submission(screen, session.activity_status())
+            if not (self.adapter.is_menu(screen) or pending):
                 raise SupervisionError("no current menu or pending submission")
+            if pending and keys != ["Enter"]:
+                raise SupervisionError("pending submission requires exactly one Enter, then observe")
             signature = self.attention_key("input_required", screen)
             count = state["choices"].get(signature, 0)
             confirms = any(key in {"Enter", "y", "n", *"0123456789"} for key in keys)
-            if confirms and (count or self.adapter.error_hint.search(screen)):
+            if confirms and (pending or count or self.adapter.error_hint.search(screen)):
                 self.charge(state)
             if confirms:
                 state["choices"][signature] = count + 1
             state["observation"] = None
+            if pending and self.adapter.confirm_submission:
+                state.update(phase="submitting", submission_stage="enter_sent",
+                             submission_started_at=time.time(), submission_enter_at=time.time())
             self.save(state)
             self.record(state, "choice", message=reason, keys=keys)
             for key in keys:

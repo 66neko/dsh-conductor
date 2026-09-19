@@ -56,14 +56,15 @@ class ScreenDiffTests(unittest.TestCase):
     def test_normalize_screen_removes_empty_and_control_characters(self) -> None:
         self.assertEqual(normalize_screen("\nhello\x07  \n   \nworld\n"), ("hello", "world"))
 
-    def test_normalize_screen_suppresses_spinner_churn_and_handoff_text(self) -> None:
+    def test_normalize_screen_keeps_working_timer_and_hides_handoff_text(self) -> None:
         first = normalize_screen(
             "• Working (7s • esc to interrupt)\n"
             "python3.13 /repo/codex_session.py complete --receipt /tmp/receipt.json\n"
         )
         second = normalize_screen("◦ Working (1m 08s • esc to interrupt)\n")
-        self.assertEqual(first, ("* Working (... • esc to interrupt)",))
-        self.assertEqual(second, first)
+        self.assertEqual(first, ("* Working (7s • esc to interrupt)",))
+        self.assertEqual(second, ("* Working (1m 08s • esc to interrupt)",))
+        self.assertNotEqual(second, first)
 
     def test_normalize_screen_hides_handoff_block_and_wrapped_token(self) -> None:
         token = "a" * 48
@@ -80,6 +81,48 @@ class ScreenDiffTests(unittest.TestCase):
 
 @unittest.skipUnless(shutil.which("tmux"), "tmux is not installed")
 class WorkerLogFollowerTests(unittest.TestCase):
+    def test_codex_working_timer_survives_redraw_capture_and_logging(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            gate = root / "advance-timer"
+            session = TmuxSession.create(
+                name=f"dsh-working-timer-{time.monotonic_ns()}", workspace=root, agent="codex",
+                command=[
+                    sys.executable, "-c",
+                    "import pathlib,sys,time\n"
+                    "def draw(elapsed):\n"
+                    "    print('\\x1b[2J\\x1b[H• Working (' + elapsed + ' • esc to interrupt)\\n\\n› Ask Codex to do anything', flush=True)\n"
+                    "draw('1m 05s')\n"
+                    "while not pathlib.Path(sys.argv[1]).exists(): time.sleep(0.01)\n"
+                    "draw('1m 15s')\n"
+                    "time.sleep(30)\n",
+                    str(gate),
+                ],
+            )
+            updates = []
+            log_file = root / "worker-screen.log"
+            follower = WorkerLogFollower(
+                session_name=session.name, agent="codex", log_file=log_file,
+                sink=lambda _agent, lines: updates.append(tuple(lines)),
+            )
+            try:
+                for elapsed in ("1m 05s", "1m 15s"):
+                    deadline = time.monotonic() + 5
+                    while elapsed not in session.capture() and time.monotonic() < deadline:
+                        time.sleep(0.02)
+                    self.assertIn(elapsed, session.capture())
+                    follower.sample_once()
+                    self.assertIn(f"* Working ({elapsed} • esc to interrupt)", updates[-1])
+                    gate.touch()
+                self.assertNotIn("* Working (1m 05s • esc to interrupt)", updates[-1])
+                self.assertEqual(len(updates), 2)
+                persisted = log_file.read_text(encoding="utf-8")
+                self.assertIn("Working (1m 05s • esc to interrupt)", persisted)
+                self.assertIn("Working (1m 15s • esc to interrupt)", persisted)
+                self.assertEqual(follower.sample_once(), ())
+            finally:
+                session.close()
+
     def test_ten_second_poll_flushes_long_final_output_before_next_tick(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -186,18 +186,28 @@ worker 必须在最终结果文件原子落盘后才写 receipt，不能把关�
 
 run/send 只登记本轮任务并立即返回，不能把命令返回视为 worker 完成。随后持续调用 watch，
 每次最多等待 300 秒（执行工具超时应设置为至少 330 秒）。不要把命令转入长期后台 job_output
-等待；watch 返回 running 时继续 watch，不能重复 run/send。watch 在就绪后自动提交已登记的任务。
+等待；watch 返回 starting/submitting/running 时检查状态后继续 watch，不能重复 run/send。
+watch 在就绪后自动提交已登记的任务。Codex 的 submitting 只表示正在确认输入，不能认定任务已执行。
+Codex 先用 bracketed paste 粘贴，读屏确认草稿后才发送 Enter，观察输入框清空后才返回 running。
+提交确认最多等待 30 秒，不被 SDK 心跳等活动重置；此限制独立于下面的活动静默阈值。
 
 连续 {worker_idle_timeout_seconds} 秒没有任何计入活动的输出或界面变化时，watch 返回 needs_attention。
 任何 worker 终端字节、重复错误、spinner、计时器、光标变化均重置静默计时；不是“有价值内容”判定。
 {heartbeat_rule}
 菜单、明显连接/工具错误、无效回执或 worker 退出可以提前触发 needs_attention。
 watch 每次到期都会返回当前屏幕、observation id 和快照；即使 status=running 也必须检查。
+reason=review 是单次 watch 等待结束，不是静默超时；有活动也会定期返回，worker 不因此停止。
+silence_seconds 才是距最近计入活动的时长；静默超时返回 needs_attention/reason=silent。
+SDK 日志中的 waiting for bash 是工具调用累计耗时，不能作为 worker 静默或恢复依据。
 如果 worker 已回到输入框、声称结束却没有有效文件，根据证据 recover 补齐或 stop 结束，不能因心跳继续而忽视。
 
 你必须根据返回的当前屏幕、snapshot_file、实际文件和进程状态做判断：
 - 网络/模型连接暂时失败：确认输入界面可用后用 recover 继续原任务；必要时显式 --interrupt。
 - 输入框等待选择：由你根据用户任务选择，使用 choose 提供精确按键及理由，不一律选 Yes。
+- submission_pending：任务文字仍在 Codex 当前输入框，尚未提交；使用 choose --keys Enter 补发一次，
+  每次计入恢复预算，随后观察是否生效。禁止 recover 追加文字或重复粘贴；历史中的提示词不等于当前草稿。
+- submission_unconfirmed：不能确认任务已启动；检查快照和当前屏幕，仅在输入框为空且未忙时 recover，
+  必要时有依据地 interrupt；无法恢复则 stop，不能因心跳或屏幕变化就认定任务执行中。
 - 声称完成却缺 result.md/receipt：检查实际文件，用 recover 要求补齐；无效回执会先归档再由 worker 重写。
 - 明确失败、工具不可用且无法恢复、凭据缺失或恢复额度耗尽：用 stop 保存末屏并终止 worker，
   然后直接写 rejected verdict。无需也不得伪造 receipt；没有 receipt 不妨碍宣告失败。

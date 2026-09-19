@@ -194,11 +194,14 @@ class ProgressReporter:
             if time.monotonic() - self._last_output < self.heartbeat_seconds:
                 continue
             if self._current_tool:
+                # 这是工具调用累计耗时，与 Supervisor 的 last_activity_at 无关。
+                # worker 输出会更新活动时钟，但不会重新开始这次工具调用。
                 waited = time.monotonic() - self._current_tool_started
                 self.emit(
                     source="dsh",
                     kind="heartbeat",
-                    message=f"... waiting for {self._current_tool} ({waited:.0f}s)",
+                    message=f"... waiting for {self._current_tool}（工具调用累计 {waited:.0f}s，非静默计时）",
+                    raw={"tool": self._current_tool, "tool_elapsed_seconds": round(waited, 1)},
                 )
             else:
                 self.emit(

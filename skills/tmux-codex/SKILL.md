@@ -13,6 +13,8 @@ description: 在 tmux 中监督 Codex，提交任务、观察活动与回执、�
 
 管理者提供 request、任务文件、receipt 路径和 token，优先原样使用管理者生成的精确命令。
 任务正文留在 task 文件中，只将读取文件和交接协议的短指令通过 tmux buffer/paste 传入 TUI。
+控制器使用 bracketed paste，先观察文字进入输入框，再单独发送 Enter。不要用逐字 send-keys
+或把粘贴结束当作提交完成；Codex 可能把 Enter 吸收为草稿换行。
 
 ```bash
 python3.13 <skill>/scripts/codex_session.py run \
@@ -44,16 +46,35 @@ watch 每 10 秒检查一次，单次最多等待 300 秒；工具执行超时�
 
 | status | 管理者下一步 |
 |---|---|
-| `running` | 检查返回的屏幕和 observation，任务继续则再次 watch；已停在输入框却无文件则诊断、补交 |
+| `starting` | 尚在启动或等待输入界面就绪，继续 watch，不重复 run/send |
+| `submitting` | 已开始粘贴，尚未确认 Codex 接收；继续 watch，不能宣称任务正在执行 |
+| `running` | 已确认提交，检查屏幕和 observation；已停在输入框却无文件则诊断、补交 |
 | `needs_attention` | 根据 reason、屏幕和 snapshot_file 决定观察、选择、恢复或结束 |
 | `receipt_ready` | 有效 token 回执与结果文件已就绪，读取文件并独立验收；blocked 表示报告阻塞 |
 | `stopped` | worker 已结束，记录失败证据并写 rejected verdict |
+
+提交确认与 300 秒活动静默计时独立。`run/send/recover` 均先粘贴，watch 确认当前输入框有草稿后
+发送一次 Enter，观察草稿清空才记录 `task_sent`。粘贴开始后 30 秒仍不能确认时返回
+`needs_attention / submission_unconfirmed`，SDK 心跳、spinner 和光标变化不会延长该期限。
+Enter 后草稿仍在时，下次采样提前返回 `submission_pending`，不要继续空等 300 秒。
+
+遇到 `submission_pending`，查看当前屏幕，用 `choose --keys Enter` 补发一次提交；每次补发计入
+全 run 最多 5 次恢复预算。控制器只允许单个 Enter，随后必须观察结果。展开的多行提示词和
+`[Pasted Content N chars]` 都可能是草稿；历史用户消息也以 `›` 开头，应结合当前输入光标判断，
+不能只搜索历史中的标记。草稿还在时禁止 recover 追加“继续”或重新粘贴任务。
+遇到 `submission_unconfirmed`，任务是否启动尚不明确，先检查快照和当前屏幕；只有确认输入框
+为空且未在忙时才 recover 重试，必要时有依据地 interrupt。无法确定或恢复耗尽则 stop，
+不能用 acknowledge 或持续心跳把它解释为正常执行。以上状态均不代表任务成功，成功仍需文件回执。
 
 默认连续 300 秒没有计入活动的变化才触发 `silent`。spinner、计时器、重复错误、终端输出字节、
 光标位置或显示模式变化都算活动；无需判断内容价值。仅客户端本地绘制的光标闪烁不可从 tmux
 读取，不凭空产生活动。SDK waiting 心跳默认也计入；request 中
 `sdk_heartbeat_counts_as_activity=false` 时才排除。持续心跳会阻止静默超时，仍须检查每次
 watch 到期返回的屏幕；不能因 SDK 还活着就认定 worker 正常。整个任务仍受 SDK 总时限约束。
+
+Codex 执行中通常显示 `• Working (1m 05s • esc to interrupt)`。worker-screen.log 会保留其中
+的实际计时，后续如变为 `1m 15s` 会记录替换行；检查 watch 返回的屏幕或日志时，把计时变化
+视为 worker 活动。它不能单独证明网络或模型请求正常，也不是回执或成功证明。
 
 菜单、错误提示、无效回执、worker 退出或监测管道失效会提前返回。错误匹配只是诊断线索，
 不自动判失败。历史错误若已恢复，使用 `watch --acknowledge <id>` 继续观察；静默时间不清零。
@@ -77,10 +98,9 @@ recover 默认发送“继续当前任务”及原任务交接协议，也可用
 若有效回执已到达，控制器拒绝恢复，转入验收。
 
 DSH 代为判断交互选择，明确当前选项及理由，再发送按键；不能一律选 Yes。屏幕变化导致
-observation 过期时重新 watch。Codex 的 `[Pasted Content N chars]` 表示可能尚未提交，可经
-观察用 choose 发送 Enter。每次操作后都要观察是否生效。
+observation 过期时重新 watch。每次操作后都要观察是否生效。
 
-主动恢复和反复卡住的菜单共享整个 run 的恢复预算，最多 5 次；首次普通菜单确认免费，
+主动恢复、补发提交 Enter 和反复卡住的菜单共享整个 run 的恢复预算，最多 5 次；首次普通菜单确认免费，
 仅移动选项或勾选复选框不消耗恢复次数。
 次数保存在 supervision.json，watch 重启及业务返工均不重置。预算用尽不得改文件绕过，必须结束。
 网络/模型暂时故障可恢复；明确失败、无法修复的工具或凭据问题应结束，无需等待 receipt。

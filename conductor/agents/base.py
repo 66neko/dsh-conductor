@@ -32,6 +32,7 @@ class AgentAdapter:
     affirmative: Pattern[str]
     ready: Pattern[str]
     pending_submission: Pattern[str] | None = None
+    confirm_submission: bool = False
     error_hint: Pattern[str] = re.compile(
         r"connection (?:failed|reset|refused)|network error|request timed out|"
         r"unable to connect|failed to connect|API error|rate limit|overloaded|"
@@ -63,8 +64,11 @@ class AgentAdapter:
     def is_ready(self, screen: str) -> bool:
         return not self.is_menu(screen) and bool(self.ready.search(screen))
 
-    def has_pending_submission(self, screen: str) -> bool:
+    def has_pending_submission(self, screen: str, activity_status: str = "") -> bool:
         return self.pending_submission is not None and bool(self.pending_submission.search(screen))
+
+    def submission_status(self, screen: str, activity_status: str) -> str:
+        return "unknown"
 
 
 def _emit(value: object) -> None:

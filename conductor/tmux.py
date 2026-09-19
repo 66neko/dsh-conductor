@@ -178,8 +178,10 @@ class TmuxSession:
             raise TmuxError("worker pane no longer belongs to this session")
         return pane
 
-    def capture(self, *, history_lines: int = 0) -> str:
-        arguments = ["capture-pane", "-p", "-J", "-t", self._pane_target()]
+    def capture(self, *, history_lines: int = 0, join_wrapped: bool = True) -> str:
+        arguments = ["capture-pane", "-p", "-t", self._pane_target()]
+        if join_wrapped:
+            arguments.append("-J")
         if history_lines > 0:
             arguments.extend(["-S", f"-{history_lines}"])
         return _run(arguments, timeout_seconds=30.0).stdout
@@ -203,7 +205,9 @@ class TmuxSession:
         pane = self._pane_target()
         _run(["load-buffer", "-b", buffer_name, "-"], input_text=text)
         try:
-            _run(["paste-buffer", "-d", "-b", buffer_name, "-t", pane])
+            # -p 在应用启用 bracketed paste 时发送边界，避免正文换行被当作按键，
+            # 也避免 Codex 的 paste-burst 检测把随后 Enter 吸收为正文换行。
+            _run(["paste-buffer", "-p", "-d", "-b", buffer_name, "-t", pane])
         finally:
             _run(["delete-buffer", "-b", buffer_name], check=False)
         if submit:

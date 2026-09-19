@@ -173,7 +173,8 @@ def main() -> int:
         print(f"中间状态目录：{workspace / '.dsh-conductor' / 'runs'}", flush=True)
         print(f"最终 JSON（run 返回后生成）：{workspace / 'quickstart-result.json'}", flush=True)
         print("worker 屏幕日志每 10 秒采样一次，结束时立即补采；完整长文从 result.md 读取。", flush=True)
-        print(f"监督阈值：{args.worker_idle_timeout_seconds} 秒；全程最多恢复 5 次；总时限 3600 秒。", flush=True)
+        print(f"静默阈值：连续 {args.worker_idle_timeout_seconds} 秒无活动，有活动重新计时；全程最多恢复 5 次；总时限 3600 秒。", flush=True)
+        print("waiting for bash 显示工具调用累计时长；watch 单次等待到期会交回 DSH 检查，不会停止 worker。", flush=True)
         if args.sdk_heartbeat_counts_as_activity:
             print("SDK 心跳计入活动：持续心跳不会触发静默超时，DSH 仍会周期检查屏幕和文件。", flush=True)
         if args.stress_report:

@@ -14,6 +14,24 @@ from conductor.models import WorkerReceipt
 
 
 class AgentControllerTests(unittest.TestCase):
+    def test_codex_distinguishes_composer_from_identical_history(self) -> None:
+        submitted = '› <dsh_conductor_handoff>\n  任务\n  </dsh_conductor_handoff>\n'
+        for screen, cursor, expected in (
+            (submitted, '26:2:1::1', 'pending'),
+            (submitted, '2:0:1::1', 'pending'),
+            (submitted + '  \n', '2:3:1::1', 'pending'),
+            ('› [Pasted Content 5000 chars]', '29:0:1::1', 'pending'),
+            (submitted + '\n• Working (1s • esc to interrupt)\n› Ask Codex to do anything', '2:5:1::1', 'empty'),
+            ('› [Pasted Content 5000 chars]\n• 完成\n› ', '2:2:1::1', 'empty'),
+            ('› Ask Codex to do anything', '2:0:1::1', 'empty'),
+            ('  长草稿顶部已滚出屏幕\n  </dsh_conductor_handoff>', '26:1:1::1', 'unknown'),
+            ('› draft', '0:0:0::1', 'unknown'),
+            ('› draft', 'invalid', 'unknown'),
+        ):
+            with self.subTest(screen=screen, cursor=cursor):
+                self.assertEqual(CODEX.submission_status(screen, cursor), expected)
+                self.assertEqual(CODEX.has_pending_submission(screen, cursor), expected == 'pending')
+
     def test_both_agents_require_result_before_writing_receipt(self) -> None:
         for adapter in (CLAUDE, CODEX):
             for status in ("ready_for_verification", "blocked"):

@@ -118,23 +118,8 @@ class TmuxTransportTests(unittest.TestCase):
                     'task_summary': 'test', 'implementation_steps': ['test'],
                     'acceptance_criteria': [{'id': 'test', 'description': 'test'}],
                 })
-                prompt = adapter.cursor_glyphs[0] + ' Ready'
-                script = root / 'worker.py'
-                script.write_text('''import json, pathlib, sys, time
-def screen(text):
-    print('\\x1b[2J\\x1b[H' + text, flush=True)
-screen('1. Continue\\nUse arrows to select')
-input()
-screen(sys.argv[1])
-input()
-screen('Network error\\n' + sys.argv[1])
-input()
-root = pathlib.Path(sys.argv[2])
-(root / 'result.md').write_text('Complete UTF-8 report', encoding='utf-8')
-(root / 'receipt.json').write_text(json.dumps({'schema_version': 1, 'token': sys.argv[3], 'status': 'ready_for_verification', 'summary': 'done'}))
-screen('Finished')
-time.sleep(30)
-''')
+                script = Path(__file__).parent / 'fixtures' / 'worker_tui.py'
+                payload = '<dsh_conductor_handoff>\n中文任务 literal $HOME $(date)\n</dsh_conductor_handoff>'
                 supervisor = Supervisor(run.request_file, adapter, selected.session)
 
                 def wait_for(reason: str):
@@ -148,15 +133,25 @@ time.sleep(30)
 
                 try:
                     start = supervisor.start(task_file=attempt.task_file, receipt_file=attempt.receipt_file,
-                                             token=attempt.token, submission='do task',
-                                             command=[sys.executable, str(script), prompt, str(attempt.receipt_file.parent), attempt.token])
+                                             token=attempt.token, submission=payload,
+                                             command=[sys.executable, str(script), adapter.cursor_glyphs[0],
+                                                      str(attempt.receipt_file.parent), attempt.token,
+                                                      *(['--swallow-enter'] if adapter.kind == 'codex' else [])])
                     self.assertEqual(start['status'], 'starting')
                     menu = wait_for('input_required')
                     supervisor.choose(observation=menu['id'], keys=['Enter'], reason='继续启动')
+                    if adapter.kind == 'codex':
+                        pending = wait_for('submission_pending')
+                        self.assertEqual(pending['phase'], 'submitting')
+                        self.assertFalse((attempt.receipt_file.parent / 'received-1.txt').exists())
+                        self.assertEqual((attempt.receipt_file.parent / 'draft-1.txt').read_text(), payload)
+                        supervisor.choose(observation=pending['id'], keys=['Enter'], reason='补发未提交的任务')
                     failure = wait_for('worker_error')
+                    self.assertEqual((attempt.receipt_file.parent / 'received-1.txt').read_text().rstrip(), payload)
                     supervisor.recover(observation=failure['id'], reason='网络恢复后继续')
                     finished = wait_for('receipt_ready')
-                    self.assertEqual(finished['recoveries'], 1)
+                    self.assertEqual(finished['recoveries'], 2 if adapter.kind == 'codex' else 1)
+                    self.assertTrue((attempt.receipt_file.parent / 'received-2.txt').read_text().endswith(payload))
                     self.assertEqual(attempt.result_file.read_text(), 'Complete UTF-8 report')
                     self.assertEqual(supervisor.stop(reason='test completed')['status'], 'stopped')
                     self.assertFalse(TmuxSession(selected.session).exists())
@@ -182,7 +177,9 @@ time.sleep(30)
                     actual = _run(["display-message", "-p", "-t", session_name, "#{history_limit}"]).stdout.strip()
                     self.assertEqual(int(actual), HISTORY_LIMIT)
                     self.assertEqual(len(session.capture(history_lines=HISTORY_LIMIT).splitlines()), count)
-                    for history, expected_count in ((None, DEFAULT_CAPTURE_HISTORY_LINES + 50), (0, 50), (HISTORY_LIMIT, count)):
+                    # 本地 tmux 的 window-size 配置或已连接客户端可能改变实际高度。
+                    height = int(_run(["display-message", "-p", "-t", session.target, "#{pane_height}"]).stdout.strip())
+                    for history, expected_count in ((None, DEFAULT_CAPTURE_HISTORY_LINES + height), (0, height), (HISTORY_LIMIT, count)):
                         with self.subTest(agent=adapter.kind, history=history):
                             args = ["capture", "--session", session_name]
                             if history is not None:

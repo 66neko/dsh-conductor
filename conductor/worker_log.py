@@ -19,7 +19,6 @@ _LOG_WRITE_LOCK = threading.Lock()
 
 _CONTROL_CHARACTERS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 _LEADING_ACTIVITY = re.compile(r"^(\s*)[•◦](?=\s)")
-_WORKING_TIMER = re.compile(r"\bWorking \((?:\d+m\s+)?\d+s(?=\s*[•·])")
 _BRAILLE_SPINNER = re.compile(r"[\u2800-\u28ff]")
 _DECORATIVE_LINE = re.compile(r"^[─━═┄┈╌╍┅┉\-_]{8,}$")
 _RECEIPT_TOKEN = re.compile(r"\b[a-f0-9]{48}\b", re.IGNORECASE)
@@ -54,9 +53,9 @@ def _is_handoff_noise(line: str) -> bool:
 
 
 def _canonicalize_dynamic_status(line: str) -> str:
-    # 仅减少展示噪声；监督时钟独立统计原始活动，计时和 spinner 仍算活动。
+    # 仅减少 spinner 展示噪声；监督时钟独立统计原始活动。
+    # 保留 Codex 的 Working 计时变化，供调用方和 DSH 观察 worker 活动。
     line = _LEADING_ACTIVITY.sub(r"\1*", line)
-    line = _WORKING_TIMER.sub("Working (...", line)
     return _BRAILLE_SPINNER.sub("*", line)
 
 

@@ -203,6 +203,12 @@ DSH 负责监督判断；控制器把提交、观察、恢复、选择和结束�
 交回 DSH。DSH 不再把整轮任务挂在长时间 `job_output` 上等待。菜单、连接错误、无效回执和
 worker 退出会提前交回判断；正常运行也会周期返回屏幕，便于发现“说完成了但文件没写好”。
 
+Codex 使用 bracketed paste，先读屏确认草稿，再发送 Enter；草稿清空后才从 `submitting` 进入
+`running`。多行草稿或折叠粘贴仍停在输入框时，会提前返回 `submission_pending`，由 DSH 补发
+一次 Enter 并重新观察；每次补发计入全 run 最多 5 次恢复预算。30 秒仍不能确认提交则返回
+`submission_unconfirmed`，要求 DSH 检查是否尚未启动。提交确认不受 SDK 心跳影响，也不等待
+300 秒静默超时。任务成功仍以有效 receipt、完整结果文件和独立验收为准。
+
 | 配置 | 默认值 | 含义 |
 |---|---:|---|
 | `worker_idle_timeout_seconds` | 300 | 连续没有活动的阈值，替代旧 `attempt_timeout_seconds` |
@@ -210,6 +216,12 @@ worker 退出会提前交回判断；正常运行也会周期返回屏幕，便�
 | `max_recovery_attempts` | 5 | 全 run 主动恢复上限，可设 1–5 |
 | `max_attempts` | 2 | 业务委派总轮数（含首轮），与恢复次数分开 |
 | `timeout_seconds` | 3600 | DSH 管理回合总时限，活动和恢复都不重置 |
+
+日志中的 `waiting for bash（工具调用累计 202s，非静默计时）` 表示 DSH 当前工具调用已等待
+多久，收到 worker 输出不会重置这个累计值。真正的静默时间见 watch 返回的 `silence_seconds`，
+按最近一次计入活动重新计算；达到阈值才返回 `needs_attention / silent`。
+`watch --wait-seconds 300` 则是单次观察窗口，到期返回 `review` 供 DSH 检查，worker 继续运行。
+监督日志会分别标注“单次等待结束”或“连续无活动”，并记录当时的静默时间和阈值。
 
 任何 worker 输出或可观察的界面变化都算活动，包括 spinner、计时器、重复错误和光标控制。
 `pipe-pane` 统计原始输出字节，因此相同内容重画也能重置时钟；只在终端客户端本地绘制的
@@ -236,6 +248,8 @@ conductor 会同时轮询两个候选 tmux 会话；DSH 选择哪个 agent 后�
 SDK 可通过 `ConductorConfig(worker_log_interval_seconds=...)` 调整间隔，CLI 可通过
 `--worker-log-interval-seconds` 调整。采样到的全部新增或替换行追加到 `worker-screen.log`；
 实时 `RunEvent(source="claude"/"codex", kind="worker_output")` 回调每次最多展示 12 行。
+Codex 的 `• Working (1m 05s • esc to interrupt)` 行会保留实际计时；下一次采样的计时变化
+会作为替换行写入 `worker-screen.log` 和 worker 输出事件，用于观察 worker 活动。
 大段重复历史会保存完整变化区域而不做昂贵的精细比较，因此诊断日志可能包含重复上下文。
 运行结束时无需等待下个周期，立即扩大到最多 50000 行历史补采一次。正常验收结束由 SDK 补采后
 按 `keep_session` 清理会话；DSH 主动 stop 则先保存末屏到 observations，再关闭会话。

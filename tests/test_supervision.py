@@ -32,7 +32,7 @@ class SupervisionTests(unittest.TestCase):
         self.session = mock.Mock(name='session')
         self.session.name = self.agent.session
         self.session.capture.return_value = '› Ask Codex to do anything'
-        self.session.activity_status.return_value = '0:1:1::1'
+        self.session.activity_status.return_value = '2:0:1::1'
         self.session.status.return_value = SimpleNamespace(workspace=str(self.root), pane_dead=False)
         factory = mock.patch('conductor.supervision.TmuxSession').start()
         self.addCleanup(mock.patch.stopall)
@@ -73,6 +73,14 @@ class SupervisionTests(unittest.TestCase):
         self.now += 10
         self.supervisor.poll()
         self.session.send_text.assert_called_once()
+        self.session.capture.return_value = '› read task; save result and receipt'
+        self.session.activity_status.return_value = '36:0:1::1'
+        self.now += 10
+        self.assertEqual(self.supervisor.poll()['status'], 'submitting')
+        self.session.capture.return_value = '› Ask Codex to do anything'
+        self.session.activity_status.return_value = '2:0:1::1'
+        self.now += 10
+        self.assertEqual(self.supervisor.poll()['status'], 'running')
 
     def test_silence_persists_across_watch_restarts(self) -> None:
         self.running()
@@ -81,6 +89,65 @@ class SupervisionTests(unittest.TestCase):
         self.now += 1
         self.assertEqual(self.new_supervisor().watch(wait_seconds=0)['reason'], 'silent')
         self.session.send_text.assert_called_once()
+
+    def test_new_output_near_watch_deadline_restarts_only_silence_clock(self) -> None:
+        self.running()
+        started = self.now
+
+        def advance(seconds: float) -> None:
+            self.now += seconds
+            if self.now == started + 290:
+                self.session.capture.return_value = '检查全部通过，正在保存报告\n› '
+                self.session.activity_status.return_value = '2:1:1::1'
+                self.activity(100)
+
+        with (mock.patch('conductor.supervision.time.monotonic', side_effect=lambda: self.now),
+              mock.patch('conductor.supervision.time.sleep', side_effect=advance)):
+            review = self.supervisor.watch(wait_seconds=300)
+            self.assertEqual(self.now, started + 300)
+            self.assertEqual((review['status'], review['reason'], review['silence_seconds']),
+                             ('running', 'review', 10))
+            # 下次 watch 沿用上次活动时间；达到最后一次输出后 300 秒才触发。
+            silent = self.new_supervisor().watch(wait_seconds=300)
+            self.assertEqual(self.now, started + 590)
+            self.assertEqual((silent['status'], silent['reason'], silent['silence_seconds']),
+                             ('needs_attention', 'silent', 300))
+        records = [json.loads(line) for line in self.supervisor.log_file.read_text().splitlines()]
+        review_log = next(row for row in records if row.get('reason') == 'review')
+        silent_log = next(row for row in records if row.get('reason') == 'silent')
+        self.assertEqual(review_log['silence_seconds'], 10)
+        self.assertEqual(silent_log['silence_seconds'], 300)
+        self.assertEqual(review_log['last_activity_at'], started + 290)
+        self.assertEqual(silent_log['worker_idle_timeout_seconds'], 300)
+        self.session.close.assert_not_called()
+        self.assertEqual(silent['recoveries'], 0)
+
+    def test_working_timer_updates_keep_running_across_multiple_watch_windows(self) -> None:
+        self.running()
+        started = self.now
+        request = json.loads(self.run.request_file.read_text())
+        request['sdk_heartbeat_counts_as_activity'] = False
+        atomic_write_json(self.run.request_file, request)
+
+        def advance(seconds: float) -> None:
+            self.now += seconds
+            elapsed = int(self.now - started)
+            self.session.capture.return_value = f'• Working ({elapsed}s • esc to interrupt)\n› Ask Codex to do anything'
+            self.session.activity_status.return_value = '2:1:1::1'
+            self.activity(elapsed)
+
+        with (mock.patch('conductor.supervision.time.monotonic', side_effect=lambda: self.now),
+              mock.patch('conductor.supervision.time.sleep', side_effect=advance)):
+            for window in (1, 2):
+                review = self.new_supervisor().watch(wait_seconds=300)
+                self.assertEqual(self.now, started + window * 300)
+                self.assertEqual((review['status'], review['reason'], review['silence_seconds']),
+                                 ('running', 'review', 0))
+        self.now += 299
+        self.assertEqual(self.new_supervisor().poll()['status'], 'running')
+        self.now += 1
+        self.assertEqual(self.new_supervisor().poll()['reason'], 'silent')
+        self.session.close.assert_not_called()
 
     def test_interrupted_submission_is_not_automatically_replayed_by_next_watch(self) -> None:
         self.supervisor.poll()
@@ -134,6 +201,7 @@ class SupervisionTests(unittest.TestCase):
     def test_repeated_errors_count_even_when_screen_identical(self) -> None:
         self.running()
         self.session.capture.return_value = 'Network error\n› '
+        self.session.activity_status.return_value = '2:1:1::1'
         attention = self.supervisor.poll()
         self.assertEqual(attention['reason'], 'worker_error')
         self.supervisor.watch(wait_seconds=0, acknowledge=attention['id'])
@@ -225,8 +293,112 @@ class SupervisionTests(unittest.TestCase):
               mock.patch('conductor.supervision.time.sleep', side_effect=advance) as sleep):
             result = self.supervisor.watch(wait_seconds=25)
         self.assertEqual([call.args[0] for call in sleep.call_args_list], [10, 10, 5])
-        self.assertEqual(result['status'], 'running')
+        self.assertEqual(result['status'], 'submitting')
         self.assertTrue(Path(result['snapshot_file']).is_file())
+
+    def paste(self) -> None:
+        self.supervisor.poll()
+        self.now += 10
+        self.assertEqual(self.supervisor.poll()['status'], 'submitting')
+        self.session.send_text.assert_called_once_with('read task; save result and receipt', submit=False)
+        self.session.send_keys.assert_not_called()
+
+    def draft(self, extra_lines: int = 0) -> None:
+        self.session.capture.return_value = ('› <dsh_conductor_handoff>\n  任务\n'
+                                             '  </dsh_conductor_handoff>\n' + '  \n' * extra_lines)
+        self.session.activity_status.return_value = f'2:{2 + extra_lines}:1::1'
+
+    def test_newline_instead_of_submit_is_reported_despite_heartbeat(self) -> None:
+        self.paste()
+        self.draft()
+        self.now += 10
+        self.assertEqual(self.supervisor.poll()['status'], 'submitting')
+        self.session.send_keys.assert_called_once_with('Enter')
+        self.draft(extra_lines=1)  # 第一次 Enter 被 TUI 吸收为换行。
+        self.now += 10
+        atomic_write_json(self.run.root / 'sdk-heartbeat.json', {'last_output_at': self.now})
+        result = self.new_supervisor().watch(wait_seconds=300)
+        self.assertEqual(result['status'], 'needs_attention')
+        self.assertEqual(result['reason'], 'submission_pending')
+        self.assertEqual(result['silence_seconds'], 0)
+        self.assertEqual(result['phase'], 'submitting')
+        with self.assertRaisesRegex(SupervisionError, 'use choose'):
+            self.supervisor.recover(observation=result['id'], reason='继续')
+        # 只补一个 Enter，不重复粘贴正文；看到空输入框后才允许标记 running。
+        def accept(key: str) -> None:
+            self.session.capture.return_value += '\n• Working (1s • esc to interrupt)\n› Ask Codex to do anything'
+            self.session.activity_status.return_value = '2:6:1::1'
+        self.session.send_keys.side_effect = accept
+        result = self.supervisor.choose(observation=result['id'], keys=['Enter'], reason='提交尚未发送的任务')
+        self.assertEqual(result['status'], 'running')
+        self.assertEqual(result['recoveries'], 1)
+        self.session.send_text.assert_called_once()
+
+    def test_unconfirmed_submission_has_independent_persisted_deadline(self) -> None:
+        self.paste()
+        for elapsed in (10, 20, 30):
+            self.now = 1010 + elapsed
+            atomic_write_json(self.run.root / 'sdk-heartbeat.json', {'last_output_at': self.now})
+            self.activity(elapsed)
+            result = self.new_supervisor().poll()
+            self.assertEqual(result['silence_seconds'], 0)
+            self.assertEqual(result['status'], 'needs_attention' if elapsed == 30 else 'submitting')
+        self.assertEqual(result['reason'], 'submission_unconfirmed')
+        self.session.send_keys.assert_not_called()
+        self.session.send_text.assert_called_once()
+
+    def test_interruption_after_enter_does_not_replay_paste_or_enter(self) -> None:
+        self.paste()
+        self.draft()
+        self.now += 10
+        self.session.send_keys.side_effect = TmuxError('interrupted after Enter')
+        with self.assertRaises(TmuxError):
+            self.supervisor.poll()
+        self.session.send_keys.side_effect = None
+        self.now += 10
+        self.assertEqual(self.new_supervisor().poll()['reason'], 'submission_pending')
+        self.session.send_keys.assert_called_once_with('Enter')
+        self.session.send_text.assert_called_once()
+
+    def test_repeated_submit_keys_share_budget_even_when_draft_changes(self) -> None:
+        self.paste()
+        self.draft()
+        self.now += 10
+        self.supervisor.poll()
+        for count in range(1, 7):
+            self.now += 10
+            self.draft(extra_lines=count)
+            result = self.new_supervisor().poll()
+            self.assertEqual(result['reason'], 'submission_pending')
+            if count <= 5:
+                result = self.supervisor.choose(observation=result['id'], keys=['Enter'], reason='补交')
+                self.assertEqual(result['recoveries'], count)
+            else:
+                with self.assertRaisesRegex(SupervisionError, 'recovery limit'):
+                    self.supervisor.choose(observation=result['id'], keys=['Enter'], reason='第六次')
+        self.assertEqual(self.session.send_keys.call_count, 6)  # 首次提交 + 五次恢复。
+        self.session.send_text.assert_called_once()
+
+    def test_recovery_and_business_rework_also_require_submission_confirmation(self) -> None:
+        self.running()
+        observation = self.supervisor.watch(wait_seconds=0)
+        self.supervisor.recover(observation=observation['id'], reason='补齐报告')
+        self.assertFalse(self.session.send_text.call_args.kwargs['submit'])
+        self.assertEqual(self.supervisor.poll()['status'], 'submitting')
+        self.receipt()
+        self.assertEqual(self.supervisor.poll()['status'], 'receipt_ready')
+        self.start(2)
+        self.supervisor.poll()
+        self.now += 10
+        self.assertEqual(self.supervisor.poll()['status'], 'submitting')
+        self.assertFalse(self.session.send_text.call_args.kwargs['submit'])
+
+    def test_pending_submission_cannot_send_multiple_enters_at_once(self) -> None:
+        self.draft()
+        result = self.supervisor.poll()
+        with self.assertRaisesRegex(SupervisionError, 'exactly one Enter'):
+            self.supervisor.choose(observation=result['id'], keys=['Enter', 'Enter'], reason='submit')
+        self.session.send_keys.assert_not_called()
 
     def test_acknowledging_silence_defers_reminder_without_resetting_clock(self) -> None:
         self.running()
@@ -274,6 +446,7 @@ class SupervisionTests(unittest.TestCase):
 
     def test_recover_cannot_append_to_pending_paste(self) -> None:
         self.session.capture.return_value = '› [Pasted Content 100 chars]'
+        self.session.activity_status.return_value = '28:0:1::1'
         observation = self.supervisor.poll()
         with self.assertRaisesRegex(SupervisionError, 'use choose'):
             self.supervisor.recover(observation=observation['id'], reason='继续')
