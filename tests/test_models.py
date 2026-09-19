@@ -34,6 +34,7 @@ class RecordTests(unittest.TestCase):
     @staticmethod
     def _receipt(workspace: Path, token: str, status: str = "ready_for_verification") -> Path:
         path = workspace / "receipt.json"
+        (workspace / "result.md").write_text("完整任务结果和检查记录", encoding="utf-8")
         path.write_text(
             json.dumps(
                 {
@@ -138,6 +139,32 @@ class RecordTests(unittest.TestCase):
             self.assertEqual(WorkerReceipt.load(path, expected_token="token-a").summary, "worker finished")
             with self.assertRaisesRegex(RecordError, "does not match"):
                 WorkerReceipt.load(path, expected_token="token-b")
+
+    def test_accepted_verdict_rejects_missing_worker_result(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            (workspace / "artifact.txt").write_text("ok", encoding="utf-8")
+            receipt = self._receipt(workspace, "token-a")
+            (workspace / "result.md").unlink()
+            with self.assertRaisesRegex(RecordError, "cannot read worker result"):
+                Verdict.load(
+                    self._verdict(workspace),
+                    plan=self._plan(workspace),
+                    max_attempts=1,
+                    workspace=workspace,
+                    expected_receipts=((receipt, "token-a"),),
+                )
+
+    def test_receipt_requires_nonempty_utf8_result_for_both_statuses(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            for status in ("ready_for_verification", "blocked"):
+                for content in (b"", b" \n\t", b"\xff"):
+                    with self.subTest(status=status, content=content):
+                        receipt = self._receipt(workspace, "token-a", status)
+                        (workspace / "result.md").write_bytes(content)
+                        with self.assertRaises(RecordError):
+                            WorkerReceipt.load(receipt, expected_token="token-a")
 
 
 if __name__ == "__main__":

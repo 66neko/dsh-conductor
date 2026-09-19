@@ -41,10 +41,12 @@ jobs:
           }
       - name: 安装构建工具
         run: python -m pip install --upgrade pip build twine check-wheel-contents
+      - name: 安装 tmux 集成测试依赖
+        run: sudo apt-get update && sudo apt-get install -y tmux
       - name: 运行测试
         run: python -m unittest discover -v
       - name: 编译检查
-        run: python -m compileall -q conductor skills tests
+        run: python -m compileall -q conductor skills tests examples
       - name: 构建 wheel 与 sdist
         run: python -m build --sdist --wheel
       - name: 检查发行包元数据
@@ -56,12 +58,17 @@ jobs:
           TEST_ENV="$RUNNER_TEMP/dsh-conductor-wheel-env"
           python -m venv "$TEST_ENV"
           "$TEST_ENV/bin/python" -m pip install --no-deps dist/*.whl
+          cd "$RUNNER_TEMP"
           "$TEST_ENV/bin/python" - <<'PY'
           from pathlib import Path
           from tempfile import TemporaryDirectory
 
+          from conductor import activity
+          from conductor.agents.claude import CLAUDE
+          from conductor.agents.codex import CODEX
           from conductor.models import AgentKind
           from conductor.skills import prepare_workspace_skills, source_skill
+          from conductor.supervision import Supervisor
 
           with TemporaryDirectory() as directory:
               root = prepare_workspace_skills(Path(directory))

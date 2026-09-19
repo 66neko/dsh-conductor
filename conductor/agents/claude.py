@@ -13,9 +13,10 @@ CLAUDE = AgentAdapter(
     executable="claude",
     arguments=("--dangerously-skip-permissions",),
     cursor_glyphs=("❯",),
-    menu_hint=re.compile(r"Enter to confirm|Esc to cancel|to navigate|to select", re.IGNORECASE),
+    menu_hint=re.compile(r"Enter to confirm|Esc to cancel|to navigate|to select|\[y/n\]|\(y/n\)", re.IGNORECASE),
     affirmative=re.compile(r"^(yes|trust|accept|continue|allow|approve)\b", re.IGNORECASE),
     ready=re.compile(r"❯|bypass permissions on", re.IGNORECASE),
+    busy_hint=re.compile(r"esc to interrupt|thinking|[✻✽✢✳✶✷].*…", re.IGNORECASE),
 )
 
 

@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import fcntl
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from .dsh import DshClient, DshConfig, DshError, RunResult
-from .models import ExecutionPlan, JsonObject, RecordError, Verdict
+from .models import ExecutionPlan, JsonObject, RecordError, Verdict, read_json_object
 from .progress import EventCallback, ProgressReporter
 from .prompt import build_prompt
 from .skills import (
@@ -15,8 +16,9 @@ from .skills import (
     dsh_home,
     prepare_workspace_skills,
 )
-from .state import RunState, default_state_root
-from .worker_log import WorkerLogFollower
+from .state import RunState, atomic_write_json, default_state_root
+from .tmux import HISTORY_LIMIT, TmuxError, TmuxSession
+from .worker_log import DEFAULT_WORKER_LOG_INTERVAL_SECONDS, WorkerLogFollower
 
 
 class ConductorError(RuntimeError):
@@ -56,12 +58,14 @@ class ConductorConfig:
     provider: str = "deepseek-official"
     model: str = "deepseek-flash"
     max_attempts: int = 2
-    attempt_timeout_seconds: int = 1200
+    worker_idle_timeout_seconds: int = 300
+    max_recovery_attempts: int = 5
+    sdk_heartbeat_counts_as_activity: bool = True
     timeout_seconds: float = 3600.0
     keep_session: bool = False
     heartbeat_seconds: float = 10.0
     worker_log: bool = True
-    worker_log_interval_seconds: float = 5.0
+    worker_log_interval_seconds: float = DEFAULT_WORKER_LOG_INTERVAL_SECONDS
     dsh_init_timeout_seconds: float = 30.0
     dsh_shutdown_timeout_seconds: float = 5.0
     dsh_extra_env: dict[str, str] = field(default_factory=dict)
@@ -69,7 +73,8 @@ class ConductorConfig:
     def __post_init__(self) -> None:
         numeric = {
             "max_attempts": self.max_attempts,
-            "attempt_timeout_seconds": self.attempt_timeout_seconds,
+            "max_recovery_attempts": self.max_recovery_attempts,
+            "worker_idle_timeout_seconds": self.worker_idle_timeout_seconds,
             "timeout_seconds": self.timeout_seconds,
             "heartbeat_seconds": self.heartbeat_seconds,
             "worker_log_interval_seconds": self.worker_log_interval_seconds,
@@ -78,8 +83,12 @@ class ConductorConfig:
         }
         if isinstance(self.max_attempts, bool) or not isinstance(self.max_attempts, int):
             raise ValueError("max_attempts must be an integer")
-        if isinstance(self.attempt_timeout_seconds, bool) or not isinstance(self.attempt_timeout_seconds, int):
-            raise ValueError("attempt_timeout_seconds must be an integer")
+        if not isinstance(self.sdk_heartbeat_counts_as_activity, bool):
+            raise ValueError("sdk_heartbeat_counts_as_activity must be a boolean")
+        if isinstance(self.worker_idle_timeout_seconds, bool) or not isinstance(self.worker_idle_timeout_seconds, int):
+            raise ValueError("worker_idle_timeout_seconds must be an integer")
+        if isinstance(self.max_recovery_attempts, bool) or not isinstance(self.max_recovery_attempts, int) or not 1 <= self.max_recovery_attempts <= 5:
+            raise ValueError("max_recovery_attempts must be an integer from 1 to 5")
         for name, value in numeric.items():
             if not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} must be greater than zero")
@@ -122,6 +131,7 @@ class TaskResult:
     verdict: Verdict
     dsh: DshRunSummary
     worker_log: Path | None = None
+    worker_result: Path | None = None
 
     @property
     def accepted(self) -> bool:
@@ -141,6 +151,8 @@ class TaskResult:
         }
         if self.worker_log is not None:
             value["worker_log"] = str(self.worker_log)
+        if self.worker_result is not None:
+            value["worker_result"] = str(self.worker_result)
         return value
 
 
@@ -170,7 +182,9 @@ class Conductor:
                 prompt=prompt,
                 available_agents=available_agents,
                 max_attempts=config.max_attempts,
-                attempt_timeout_seconds=config.attempt_timeout_seconds,
+                worker_idle_timeout_seconds=config.worker_idle_timeout_seconds,
+                max_recovery_attempts=config.max_recovery_attempts,
+                sdk_heartbeat_counts_as_activity=config.sdk_heartbeat_counts_as_activity,
                 keep_session=config.keep_session,
             )
         except (DshError, OSError) as exc:
@@ -182,8 +196,9 @@ class Conductor:
                 skill_scripts=skill_scripts,
                 available_agents=available_agents,
                 max_attempts=config.max_attempts,
-                attempt_timeout_seconds=config.attempt_timeout_seconds,
+                worker_idle_timeout_seconds=config.worker_idle_timeout_seconds,
                 keep_session=config.keep_session,
+                sdk_heartbeat_counts_as_activity=config.sdk_heartbeat_counts_as_activity,
             )
             state.write_manager_prompt(manager_prompt)
         except OSError as exc:
@@ -196,6 +211,8 @@ class Conductor:
         reporter = ProgressReporter(
             on_event=on_event,
             heartbeat_seconds=config.heartbeat_seconds,
+            heartbeat_file=state.root / "sdk-heartbeat.json" if config.sdk_heartbeat_counts_as_activity else None,
+            supervision_log=state.root / "supervision.jsonl",
         ).start()
         reporter.emit(source="conductor", kind="run_start", message=f"run {state.run_id}")
         reporter.emit(source="conductor", kind="state", message=f"state {state.root}")
@@ -214,6 +231,7 @@ class Conductor:
                     ).start()
                 )
 
+        finalized = False
         try:
             run: RunResult | None = None
             try:
@@ -279,7 +297,28 @@ class Conductor:
                     state_directory=state.root,
                 ) from exc
 
+            # DSH 必须保留会话到 SDK 完成末次采样，避免 10 秒采样间隔吞掉结束前的输出。
+            # 失败必须停止 worker；日志和证据保留在运行目录。
+            if verdict.status == "rejected":
+                self._stop_workers(state, reporter, reason=verdict.summary)
+            elif not config.keep_session:
+                try:
+                    session = TmuxSession(selected.session)
+                    if session.exists():
+                        status = session.status()
+                        if status.agent != plan.agent.value or status.workspace != str(self.workspace):
+                            raise TmuxError("worker session metadata does not match this run")
+                        session.close()
+                except TmuxError as exc:
+                    reporter.emit(source="conductor", kind="cleanup_error", message=f"tmux cleanup: {exc}")
+
+            reporter.read_supervision()
             reporter.emit(source="conductor", kind="run_end", message=f"verdict {verdict.status}")
+            finalized = True
+            worker_result = (
+                selected.attempts[verdict.attempts - 1].result_file
+                if verdict.attempts else None
+            )
             return TaskResult(
                 run_id=state.run_id,
                 workspace=self.workspace,
@@ -289,6 +328,40 @@ class Conductor:
                 verdict=verdict,
                 dsh=DshRunSummary.from_run(run),
                 worker_log=state.worker_log_file if state.worker_log_file.exists() else None,
+                worker_result=worker_result if worker_result and worker_result.is_file() else None,
             )
         finally:
+            if not finalized:
+                self._stop_workers(state, reporter, reason="SDK/DSH 异常、超时或结果无效，结束 worker")
             reporter.stop()
+
+    def _stop_workers(self, state: RunState, reporter: ProgressReporter, *, reason: str) -> None:
+        # 与控制器操作互斥，结束标记阻止尚未退出的 watch/recover 再次提交。
+        try:
+            with (state.root / "supervision.lock").open("a") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                atomic_write_json(state.root / "sdk-stop.json", {"run_id": state.run_id, "reason": reason})
+                for agent in state.agents:
+                    try:
+                        session = TmuxSession(agent.session)
+                        if not session.exists():
+                            continue
+                        status = session.status()
+                        if status.agent != agent.kind.value or Path(status.workspace).resolve() != self.workspace:
+                            raise TmuxError("worker session metadata does not match this run")
+                        try:
+                            screen = session.capture(history_lines=HISTORY_LIMIT)
+                            (state.root / f"sdk-stop-{agent.kind.value}.txt").write_text(screen, encoding="utf-8")
+                        finally:
+                            session.close()
+                        reporter.emit(source="conductor", kind="supervision_stopped", message=f"{agent.kind.value}: {reason}")
+                    except (TmuxError, OSError) as exc:
+                        reporter.emit(source="conductor", kind="cleanup_error", message=f"tmux stop: {exc}")
+                path = state.root / "supervision.json"
+                if path.exists():
+                    supervision = read_json_object(path)
+                    if supervision.get("run_id") == state.run_id:
+                        supervision.update(phase="stopped", stop_reason=reason)
+                        atomic_write_json(path, supervision)
+        except (OSError, RecordError) as exc:
+            reporter.emit(source="conductor", kind="cleanup_error", message=f"worker stop: {exc}")

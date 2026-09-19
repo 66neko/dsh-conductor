@@ -130,6 +130,56 @@ raise SystemExit(0 if result.accepted else 1)
 更完整的字段说明、错误 JSON 和实时事件格式见 [`docs/result-json.md`](docs/result-json.md)。
 可运行示例见 [`examples/quickstart.py`](examples/quickstart.py)。
 
+仓库中的 quickstart 预设了一个较完整的订单 CSV 汇总任务。先自检 tmux 长输出采集，再让
+worker 实现金额汇总、错误处理和单元测试，最后交付记录实现、检查结果及文件路径的 `result.md`。
+默认报告只包含业务内容。调用方会再次检查报告末尾标记、汇总是否为 `66.00`，以及无效输入
+是否保留既有输出。
+
+在仓库根目录运行（直接执行脚本会使用当前仓库源码）：
+
+```bash
+python3.13 -m conductor doctor
+python3.13 examples/quickstart.py                 # 默认使用 Claude Code
+python3.13 examples/quickstart.py --agent codex   # 使用 Codex 再验证一次
+```
+
+仅验证 tmux 采集、不启动 DSH 或模型时，运行：
+
+```bash
+python3.13 examples/quickstart.py --tmux-only
+```
+
+仅在需要验证长报告交接时，显式启用 6000 行编号压力测试：
+
+```bash
+python3.13 examples/quickstart.py --stress-report
+```
+
+该选项要求 worker 用 Python 生成编号，并要求 DSH 读取完整报告，会增加模型上下文开销。
+日常验证无需启用；tmux 的 6000 行采集自检由本地 Python 生成和检查，任务明确无需读取其日志。
+
+正常会看到 tmux 当前屏幕 50 行、最近历史连同屏幕 5050 行、扩大读取 6000 行；
+日志保留 5050 行，实时回调只有 12 行。真实 worker 任务成功后显示“全部验证通过”。
+每次使用新的 `/tmp/dsh-quickstart-…` 工作区（系统临时目录配置可改变位置），运行结束后保留
+`quickstart-result.json`、`result.md` 和日志；成功时保留 worker 会话并打印 attach/关闭命令，失败时停止 worker。
+`quickstart-result.json` 在 `run()` 返回后才写入；运行中的 request、plan、verdict 和屏幕日志
+位于 `<workspace>/.dsh-conductor/runs/<run-id>/`，每轮 task、result、receipt 位于该目录的
+`attempts/<claude或codex>/<轮次>/`。`<workspace>/.dsh-conductor/latest.json` 记录最近运行的目录。
+运行中的 worker 屏幕日志每 10 秒采样一次，结束时立即补采；DSH 协议事件仍实时显示。
+`--agent` 是此示例选择预设 prompt 的参数；SDK 业务输入仍只有 workspace 与完整 prompt。
+
+验证仅由 worker 活动驱动的静默检测时，可以排除 SDK 自动心跳，并缩短测试阈值：
+
+```bash
+python3.13 examples/quickstart.py --agent codex \
+  --no-sdk-heartbeat-counts-as-activity --worker-idle-timeout-seconds 30
+```
+
+正常运行使用默认 300 秒。示例会打印 `supervision.json` 和 `supervision.jsonl` 路径，可查看
+诊断、恢复次数、选择理由与停止原因。无需真实模型的故障回归运行
+`python3.13 -m unittest tests.test_supervision tests.test_tmux tests.test_sdk -v`，覆盖恢复上限、
+菜单、缺失报告、迟到回执及总超时；tmux 流程使用本地模拟 worker。
+
 ## CLI
 
 CLI 是 SDK 的薄封装，保留给脚本和人工调用：
@@ -148,7 +198,53 @@ python3.13 -m conductor run \
 
 ## 日志与状态
 
-conductor 会同时轮询两个候选 tmux 会话；DSH 选择哪个 agent 后，只有实际存在的会话产生屏幕日志。默认每 5 秒采样一次，SDK 可通过 `ConductorConfig(worker_log_interval_seconds=...)` 调整，CLI 可通过 `--worker-log-interval-seconds` 调整。变化会通过 `RunEvent(source="claude"/"codex", kind="worker_output")` 回调，并追加到 `worker-screen.log`。屏幕文字不会被当作完成或验收信号。
+DSH 负责监督判断；控制器把提交、观察、恢复、选择和结束拆成独立操作。`run/send` 登记任务后
+立即返回，`watch` 就绪时提交任务、每 10 秒检查一次，每次最多等待 300 秒就把屏幕和文件状态
+交回 DSH。DSH 不再把整轮任务挂在长时间 `job_output` 上等待。菜单、连接错误、无效回执和
+worker 退出会提前交回判断；正常运行也会周期返回屏幕，便于发现“说完成了但文件没写好”。
+
+| 配置 | 默认值 | 含义 |
+|---|---:|---|
+| `worker_idle_timeout_seconds` | 300 | 连续没有活动的阈值，替代旧 `attempt_timeout_seconds` |
+| `sdk_heartbeat_counts_as_activity` | True | SDK waiting 心跳也重置活动时钟 |
+| `max_recovery_attempts` | 5 | 全 run 主动恢复上限，可设 1–5 |
+| `max_attempts` | 2 | 业务委派总轮数（含首轮），与恢复次数分开 |
+| `timeout_seconds` | 3600 | DSH 管理回合总时限，活动和恢复都不重置 |
+
+任何 worker 输出或可观察的界面变化都算活动，包括 spinner、计时器、重复错误和光标控制。
+`pipe-pane` 统计原始输出字节，因此相同内容重画也能重置时钟；只在终端客户端本地绘制的
+光标闪烁不可被 tmux 感知。默认 SDK 心跳也算活动，因此**持续心跳时 300 秒静默检测不会触发**。
+DSH 仍须检查 watch 周期返回的屏幕，错误、选择和无效回执仍可提前触发判断，总超时仍有效。
+如需只计 worker 活动，设置 `ConductorConfig(sdk_heartbeat_counts_as_activity=False)`，
+CLI 使用 `--no-sdk-heartbeat-counts-as-activity`。关闭屏幕日志或回调不会关闭监督或 SDK 心跳记录。
+
+网络或模型连接暂时故障时，DSH 根据现场发送“继续”或具体补交指令；交互选择由 DSH 根据任务
+代做。首次普通菜单选择免费，重复卡住的菜单和主动恢复共用恢复预算，跨 watch 和业务返工不
+清零，最多 5 次。明确无法恢复或额度耗尽时先保存末屏、停止 worker，再写 rejected；失败无需
+有效回执。失败与总超时即使设置 `keep_session=True` 也会停止 worker，所有诊断文件仍保留。
+
+Claude Code 和 Codex 每轮都必须将完整回答、关键结论、修改记录、检查结果及阻塞信息写入
+`result.md`，长检查输出另存文件并在结果中引用。结果最终原子落盘后才能写入绑定 token 的
+receipt；控制器和 SDK 都会拒绝缺失、空白或非 UTF-8 的结果文件。DSH 收到回执后读取完整结果
+及相关引用文件，再独立检查工作区。`TaskResult.worker_result`（JSON 中同名字段）提供最后
+一轮已有结果文件的路径；它是 worker 的报告，不替代 verdict。
+
+conductor 会同时轮询两个候选 tmux 会话；DSH 选择哪个 agent 后，只有实际存在的会话产生屏幕日志。
+会话名精确匹配，读屏和输入固定到启动时的 worker pane，切换 tmux 窗口不会改变控制目标。
+启动时立即采样，之后默认每 10 秒采样当前屏幕及最近 5000 行历史，只有内容变化才发出日志事件，
+不会随屏幕刷新触发采样。tmux 窗口创建时的历史上限为 50000 行。
+SDK 可通过 `ConductorConfig(worker_log_interval_seconds=...)` 调整间隔，CLI 可通过
+`--worker-log-interval-seconds` 调整。采样到的全部新增或替换行追加到 `worker-screen.log`；
+实时 `RunEvent(source="claude"/"codex", kind="worker_output")` 回调每次最多展示 12 行。
+大段重复历史会保存完整变化区域而不做昂贵的精细比较，因此诊断日志可能包含重复上下文。
+运行结束时无需等待下个周期，立即扩大到最多 50000 行历史补采一次。正常验收结束由 SDK 补采后
+按 `keep_session` 清理会话；DSH 主动 stop 则先保存末屏到 observations，再关闭会话。
+两个 skill 的 `capture` 同样默认读取 5000 行历史，可用 `--history-lines 50000` 扩大范围，
+或用 `--history-lines 0` 只看当前屏幕。控制器处理菜单时始终只看当前屏幕，避免误认历史菜单。
+备用屏幕、重绘或超出采样范围的输出仍可能遗漏，屏幕日志只用于观察状态；文件出现和屏幕文字
+都不会被当作完成或验收信号，完整结果以 `result.md` 及引用文件为准。
+屏幕日志与 watch 各自以 10 秒周期采样，DSH 协议事件仍实时回调。原始输出活动计数独立于日志
+展示，不使用去重或 spinner 归一化结果；交接和菜单通常在下次 watch 检查时被发现。
 
 状态目录默认位于当前 `workspace` 下的 `.dsh-conductor/`；可通过
 `ConductorConfig(state_dir=...)` 或 CLI 的 `--state-dir` 指定其他位置：
@@ -161,9 +257,16 @@ conductor 会同时轮询两个候选 tmux 会话；DSH 选择哪个 agent 后�
 ├── plan.json
 ├── verdict.json
 ├── worker-screen.log
+├── supervision.json         # 活动时钟、恢复预算、当前轮次
+├── supervision.jsonl        # 诊断、选择、恢复与停止审计
+├── worker-activity.json     # 原始终端字节计数及最后输出时间
+├── sdk-heartbeat.json       # SDK 心跳时间（计入活动时生成）
+├── observations/            # DSH 操作前屏幕证据，stop 保存最终历史
+├── sdk-stop.json            # 失败/总超时的结束原因（发生时生成）
+├── sdk-stop-<agent>.txt      # SDK 兜底结束前的历史快照（发生时生成）
 └── attempts/
-    ├── claude/1/{task.md,receipt.json}
-    └── codex/1/{task.md,receipt.json}
+    ├── claude/1/{task.md,result.md,receipt.json}
+    └── codex/1/{task.md,result.md,receipt.json}
 ```
 
 每轮运行使用新的 run id 和 receipt token，避免读取旧结论。accepted verdict 必须同时满足 DSH `turn/end` + `session.status=idle`、所有验收项通过、产物路径安全且选定 agent 的最终 receipt 有效。
@@ -171,7 +274,7 @@ conductor 会同时轮询两个候选 tmux 会话；DSH 选择哪个 agent 后�
 ## 开发验证
 
 ```bash
-python3.13 -m compileall -q conductor skills tests
+python3.13 -m compileall -q conductor skills tests examples
 python3.13 -m unittest discover -v
 python3.13 ~/.codex/skills/.system/skill-creator/scripts/quick_validate.py skills/tmux-claude-code
 python3.13 ~/.codex/skills/.system/skill-creator/scripts/quick_validate.py skills/tmux-codex

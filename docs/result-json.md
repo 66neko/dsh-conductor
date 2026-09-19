@@ -115,6 +115,7 @@ python3.13 -m conductor run \
 | `verdict` | object | 是 | DSH 独立验收后产生的结论，格式见 [`verdict`](#verdict-对象)。 |
 | `dsh` | object | 是 | 本次 DSH 管理回合的协议摘要，格式见 [`dsh`](#dsh-对象)。 |
 | `worker_log` | string | 否 | `worker-screen.log` 的绝对路径。关闭采集或没有产生日志文件时字段会被省略，不会返回 `null`。 |
+| `worker_result` | string | 否 | 所选 agent 最后一轮 `result.md` 的绝对路径。未提交 worker 或本轮未生成文件时省略；报告须结合 verdict 判断，文件存在不代表通过验收。 |
 
 `TaskResult.accepted` 是 Python 对象上的便捷布尔属性，等价于
 `result.verdict.status == "accepted"`。它不会作为单独字段写入 JSON；JSON 调用方应检查
@@ -218,6 +219,11 @@ python3.13 -m conductor run \
 
 上面只展示差异相关字段；真实返回仍包含[顶层字段](#顶层字段)中列出的完整对象。
 
+worker 未生成合法 receipt/result.md 也可以 rejected，DSH 应在停止 worker 后写明屏幕和实际文件
+证据。恢复次数不计入 verdict.attempts；该字段仍是业务委派轮数。恢复最多 5 次，具体计数、
+选择和停止原因见 state_directory 下的 supervision.json、supervision.jsonl、observations/。
+`worker_result` 只在报告存在时返回，rejected 下的报告可能不完整，不能据此判断成功。
+
 ## 错误 JSON
 
 Python SDK 遇到 DSH 启动失败、超时、协议未完成或结果文件不合法时会抛出
@@ -255,6 +261,9 @@ CLI 会捕获这类异常，并在 stdout 输出如下 JSON：
 工作目录无效、配置参数非法等发生在运行状态创建前的错误，通常不会包含 `run_id` 和
 `state_directory`。因此调用方必须按可选字段处理，不能用 `null` 判断。
 
+总超时或 DSH 异常时 SDK 会停止身份匹配的本 run worker 并保留 sdk-stop.json 和末次历史快照，
+不会伪造 rejected verdict；错误 JSON 与业务拒绝仍明确区分。keep_session 只保留正常验收结束的会话。
+
 ## 实时事件 `RunEvent`
 
 传给 `Conductor.run(prompt, on_event=...)` 的回调会实时收到 `RunEvent`。如果需要 JSON，
@@ -279,6 +288,11 @@ CLI 会捕获这类异常，并在 stdout 输出如下 JSON：
 
 `RunEvent` 是可观测性数据，不会追加到最终 `TaskResult` JSON。回调异常也不会改变任务
 执行和最终验收结果。
+
+监督另会发出 `supervision_needs_attention`、`supervision_recovery`、`supervision_choice`、
+`supervision_receipt` 和 `supervision_stopped` 等事件；raw 携带相应审计记录，恢复消息包含累计次数。
+关闭 worker_log 不影响这些事件。SDK 心跳默认计入活动时钟，持续心跳会阻止 300 秒静默超时，
+但不影响其他诊断及总超时；可通过 sdk_heartbeat_counts_as_activity=False 排除。
 
 ## 消费建议
 

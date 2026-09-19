@@ -21,7 +21,7 @@ class PromptTests(unittest.TestCase):
                 prompt="请使用 Codex 修改文件。验收标准：测试通过。",
                 available_agents=set(AgentKind),
                 max_attempts=2,
-                attempt_timeout_seconds=60,
+                worker_idle_timeout_seconds=60,
                 keep_session=False,
             )
             prompt = build_prompt(
@@ -32,7 +32,7 @@ class PromptTests(unittest.TestCase):
                 },
                 available_agents=set(AgentKind),
                 max_attempts=2,
-                attempt_timeout_seconds=60,
+                worker_idle_timeout_seconds=60,
                 keep_session=False,
             )
             self.assertIn("claude_session.py run", prompt)

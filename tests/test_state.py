@@ -20,7 +20,7 @@ class RunStateTests(unittest.TestCase):
                 prompt="实现任务。验收标准：测试通过。",
                 available_agents={AgentKind.CODEX},
                 max_attempts=2,
-                attempt_timeout_seconds=30,
+                worker_idle_timeout_seconds=30,
                 keep_session=False,
             )
             request = read_json_object(state.request_file)
@@ -34,6 +34,11 @@ class RunStateTests(unittest.TestCase):
                 self.assertEqual(len(attempts), 2)
                 self.assertNotEqual(attempts[0].token, attempts[1].token)
                 self.assertNotEqual(attempts[0].receipt_file, attempts[1].receipt_file)
+                self.assertNotEqual(attempts[0].result_file, attempts[1].result_file)
+                for attempt in attempts:
+                    self.assertEqual(attempt.result_file.parent, attempt.receipt_file.parent)
+                    self.assertEqual(attempt.to_json()["result_file"], str(attempt.result_file))
+                    self.assertFalse(attempt.result_file.exists())
             self.assertNotEqual(
                 state.agent_state(AgentKind.CLAUDE).session,
                 state.agent_state(AgentKind.CODEX).session,

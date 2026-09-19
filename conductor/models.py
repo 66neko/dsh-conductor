@@ -69,9 +69,25 @@ def read_json_object(path: Path) -> JsonObject:
         value = json.loads(path.read_text(encoding="utf-8"))
     except OSError as exc:
         raise RecordError(f"cannot read {path}: {exc}") from exc
-    except json.JSONDecodeError as exc:
+    except (json.JSONDecodeError, UnicodeError) as exc:
         raise RecordError(f"invalid JSON in {path}: {exc}") from exc
     return _object(value, str(path))
+
+
+def worker_result_path(receipt_file: Path) -> Path:
+    """结果固定存放在本轮 receipt 同目录，不能由终端输出重定向到其他轮次。"""
+    return receipt_file.with_name("result.md")
+
+
+def read_worker_result(receipt_file: Path) -> str:
+    path = worker_result_path(receipt_file)
+    try:
+        content = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise RecordError(f"cannot read worker result {path}: {exc}") from exc
+    if not content.strip():
+        raise RecordError(f"worker result is empty: {path}")
+    return content
 
 
 @dataclass(frozen=True, slots=True)
@@ -309,6 +325,8 @@ class WorkerReceipt:
         status = _string(record, "status")
         if status not in {"ready_for_verification", "blocked"}:
             raise RecordError("worker receipt has an unsupported status")
+        # 回执是交接信号；完整结果必须已经落盘，包括 blocked 时的原因和已完成工作。
+        read_worker_result(path)
         return cls(token=token, status=status, summary=_string(record, "summary"))
 
     def to_json(self) -> JsonObject:

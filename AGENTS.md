@@ -14,6 +14,8 @@
 | `conductor/prompt.py` | 发给 DSH 的中文拆解、委派、监督和验收契约 |
 | `conductor/progress.py` | `RunEvent`、DSH 协议进度、心跳和 worker 日志事件 |
 | `conductor/worker_log.py` | 轮询精确 tmux 会话并持久化屏幕变化 |
+| `conductor/supervision.py` | 持久化活动时钟、恢复预算、DSH 选择/恢复/结束操作与证据 |
+| `conductor/activity.py` | tmux 原始输出字节计数，保留重复输出与光标控制活动 |
 | `conductor/skills.py` | skill 定位、复制到 workspace 与环境可用性检查 |
 | `skills/tmux-claude-code` | Claude Code 专属 tmux 控制 skill |
 | `skills/tmux-codex` | Codex 专属 tmux 控制 skill |
@@ -26,12 +28,14 @@
 3. CLI `run` 只接受 `--workspace` 与 `--prompt`，不再接受 `--agent`、`--task`、`--verify`。
 4. CLI stdout 只有一个 JSON 对象；实时进度由 `RunEvent` 回调交给调用方，CLI 再写 stderr。
 5. DSH 是否完成只认 `turn/end.reason.kind` 与 `session.status == idle`。
-6. worker 是否完成只认绑定 token 的 receipt 文件；不解析自然语言、屏幕稳定或产物出现。
+6. worker 成功交接只认绑定 token 的 receipt 和非空 UTF-8 result.md；屏幕可用于诊断、选择、恢复和失败判断，不能作为成功依据；失败无需回执。
 7. 验收只认 schema v2 verdict，并再次绑定 run id、plan agent、criterion id、receipt token 和工作区路径。
 8. `DSH_PERMISSION_MODE` 必须是 `danger-full-access`，由 DSH 客户端强制设置。
 9. 两个 skill 只有仓库中的源码；运行前直接覆盖到 `<workspace>/.dsh/skills`，不写入全局目录；修改 skill 时同步中文 `SKILL.md`。
 10. tmux 文本通过 buffer/paste 传递，不能把自然语言直接拼入 shell 命令。
 11. `project/` 是用户目录，除非用户明确要求，不修改、不删除、不提交。
+12. 默认活动静默阈值 300 秒；任何 worker 输出/变化及 SDK 心跳计入活动。SDK 心跳可显式排除；持续心跳时静默检测不会触发，DSH 仍须检查周期返回的屏幕。
+13. 主动恢复和重复卡住的菜单共用全 run 最多 5 次预算，不随 watch 或业务返工清零；首次普通选择免费。失败和总超时停止 worker，保留证据。
 
 ## 常用命令
 

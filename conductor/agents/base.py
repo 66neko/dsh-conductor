@@ -4,19 +4,18 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 import shlex
 import shutil
 import sys
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Pattern, Sequence
 
-from ..models import RecordError, WorkerReceipt
+from ..models import RecordError, WorkerReceipt, read_worker_result, worker_result_path
 from ..state import atomic_write_json
-from ..tmux import TmuxError, TmuxSession
+from ..tmux import DEFAULT_CAPTURE_HISTORY_LINES, TmuxError, TmuxSession
+from ..supervision import SupervisionError, Supervisor
 
 
 class WorkerError(RuntimeError):
@@ -33,6 +32,13 @@ class AgentAdapter:
     affirmative: Pattern[str]
     ready: Pattern[str]
     pending_submission: Pattern[str] | None = None
+    error_hint: Pattern[str] = re.compile(
+        r"connection (?:failed|reset|refused)|network error|request timed out|"
+        r"unable to connect|failed to connect|API error|rate limit|overloaded|"
+        r"authentication (?:failed|error)|tool not found|工具不可用|连接失败|网络故障|阻塞：",
+        re.IGNORECASE,
+    )
+    busy_hint: Pattern[str] = re.compile(r"esc to interrupt|thinking|思考中", re.IGNORECASE)
 
     def resolve_command(self, explicit_binary: str | None = None) -> list[str]:
         raw = explicit_binary or shutil.which(self.executable)
@@ -75,9 +81,14 @@ def _submission_prompt(*, task_file: Path, script: Path, receipt: Path, token: s
         "--status ready_for_verification --summary '简短事实总结'"
     )
     blocked = command.replace("ready_for_verification", "blocked")
+    result_file = worker_result_path(receipt)
     return f"""
 <dsh_conductor_handoff>
 请完整读取任务文件 `{task_file}`，自主完成其中的任务和自检。该文件不是验收结论。
+把完整回答、关键结论、修改的文件、执行的检查及结果、未完成事项写入 UTF-8 文件
+`{result_file}`。重要内容随工作及时保存；长输出保存在本轮目录的独立文件中，并在结果文件
+中记录路径，不能只留在终端。提交回执前，先写临时文件再原子替换 result.md，确保最终结果完整。
+终端只显示简短进度和文件路径。若任务阻塞，也必须先把原因和已完成工作写入结果文件。
 全部编辑与检查结束后，最后一个工具操作必须运行下列命令，并把 summary 占位文字改为简短事实总结：
 
 {command}
@@ -91,158 +102,6 @@ def _submission_prompt(*, task_file: Path, script: Path, receipt: Path, token: s
 """.strip()
 
 
-def wait_until_ready(
-    session: TmuxSession,
-    adapter: AgentAdapter,
-    *,
-    timeout_seconds: float,
-    ready_settle_seconds: float = 2.0,
-) -> None:
-    deadline = time.monotonic() + timeout_seconds
-    menu_steps = 0
-    ready_since: float | None = None
-    while time.monotonic() < deadline:
-        screen = session.capture()
-        status = session.status()
-        if status.pane_dead:
-            raise WorkerError(f"{adapter.kind} exited during startup\n{screen[-2000:]}")
-        if adapter.is_menu(screen):
-            ready_since = None
-            label = adapter.cursor_label(screen)
-            if label and adapter.affirmative.search(label):
-                session.send_keys("Enter")
-                time.sleep(1.0)
-                menu_steps = 0
-                continue
-            if menu_steps >= 8:
-                raise WorkerError(f"cannot find an affirmative startup option\n{screen[-2000:]}")
-            menu_steps += 1
-            session.send_keys("Down")
-            # Claude Code 异步重绘菜单；过早读屏会看到旧光标并误判为没有移动。
-            time.sleep(0.75)
-            continue
-        if adapter.is_ready(screen):
-            # 启动界面可能先显示输入框，随后才弹出目录信任菜单；稳定后再粘贴任务。
-            if ready_since is None:
-                ready_since = time.monotonic()
-            elif time.monotonic() - ready_since >= ready_settle_seconds:
-                return
-        else:
-            ready_since = None
-        time.sleep(0.5)
-    raise WorkerError(f"{adapter.kind} did not become ready\n{session.capture()[-2000:]}")
-
-
-def wait_for_receipt(
-    session: TmuxSession,
-    *,
-    adapter: AgentAdapter,
-    receipt_file: Path,
-    token: str,
-    timeout_seconds: float,
-    submission: str,
-) -> tuple[WorkerReceipt, float]:
-    started = time.monotonic()
-    deadline = started + timeout_seconds
-    last_error: str | None = None
-    menu_steps = 0
-    resubmit_after_menu = False
-    last_submit = time.monotonic()
-    while time.monotonic() < deadline:
-        if receipt_file.exists():
-            try:
-                receipt = WorkerReceipt.load(receipt_file, expected_token=token)
-                return receipt, time.monotonic() - started
-            except RecordError as exc:
-                last_error = str(exc)
-        screen = session.capture()
-        if adapter.is_menu(screen):
-            label = adapter.cursor_label(screen)
-            if label and adapter.affirmative.search(label):
-                session.send_keys("Enter")
-                menu_steps = 0
-                resubmit_after_menu = True
-                time.sleep(1.0)
-                continue
-            if menu_steps >= 8:
-                raise WorkerError(f"cannot handle worker menu while waiting for receipt\n{screen[-2000:]}")
-            session.send_keys("Down")
-            menu_steps += 1
-            time.sleep(0.75)
-            continue
-        if resubmit_after_menu and adapter.is_ready(screen):
-            # 菜单可能截断首次粘贴；清空残留输入后完整重投，不能只补发 Enter。
-            session.send_keys("C-c")
-            time.sleep(0.25)
-            session.send_text(submission)
-            resubmit_after_menu = False
-            last_submit = time.monotonic()
-            time.sleep(0.5)
-            continue
-        if adapter.has_pending_submission(screen) and time.monotonic() - last_submit >= 2.0:
-            # Codex 可能在 Enter 到达后才完成 bracketed paste。仅当编辑器仍显示
-            # pending-paste 标记时节流重发，避免无依据地重复提交任务。
-            session.send_keys("Enter")
-            last_submit = time.monotonic()
-            time.sleep(0.5)
-            continue
-        if session.status().pane_dead:
-            raise WorkerError(f"worker process exited before writing its receipt\n{screen[-2000:]}")
-        time.sleep(0.5)
-    detail = f"; last receipt error: {last_error}" if last_error else ""
-    raise WorkerError(f"timed out waiting for worker receipt {receipt_file}{detail}")
-
-
-def submit(
-    *,
-    session: TmuxSession,
-    adapter: AgentAdapter,
-    task_file: Path,
-    receipt_file: Path,
-    token: str,
-    script: Path,
-    timeout_seconds: float,
-) -> dict[str, object]:
-    if receipt_file.exists():
-        raise WorkerError(f"refusing stale receipt path: {receipt_file}")
-    try:
-        task = task_file.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise WorkerError(f"cannot read task file {task_file}: {exc}") from exc
-    if not task.strip():
-        raise WorkerError(f"task file is empty: {task_file}")
-    receipt_file.parent.mkdir(parents=True, exist_ok=True)
-    prompt = _submission_prompt(
-        task_file=task_file.resolve(),
-        script=script,
-        receipt=receipt_file.resolve(),
-        token=token,
-    )
-    session.send_text(prompt)
-    # 长文本粘贴可能在首个 Enter 后才完成展开；菜单由后续分支处理，其余状态只补交一次。
-    time.sleep(2.0)
-    if not receipt_file.exists() and not adapter.is_menu(session.capture()):
-        session.send_keys("Enter")
-    receipt, elapsed = wait_for_receipt(
-        session,
-        adapter=adapter,
-        receipt_file=receipt_file,
-        token=token,
-        timeout_seconds=timeout_seconds,
-        submission=prompt,
-    )
-    return {
-        "schema_version": 1,
-        "session": session.name,
-        "agent": adapter.kind,
-        "status": receipt.status,
-        "summary": receipt.summary,
-        "receipt_file": str(receipt_file.resolve()),
-        "elapsed_seconds": round(elapsed, 3),
-        "attach_command": f"tmux attach -t {session.name}",
-    }
-
-
 def build_parser(adapter: AgentAdapter) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog=f"{adapter.kind}_session.py",
@@ -250,28 +109,38 @@ def build_parser(adapter: AgentAdapter) -> argparse.ArgumentParser:
     )
     commands = parser.add_subparsers(dest="command", required=True)
 
-    run = commands.add_parser("run", help="start a session, submit a task, and wait for its receipt")
-    run.add_argument("--workspace", type=Path, required=True)
-    run.add_argument("--session", required=True)
-    run.add_argument("--task-file", type=Path, required=True)
-    run.add_argument("--receipt", type=Path, required=True)
-    run.add_argument("--token", required=True)
-    run.add_argument("--binary")
-    run.add_argument("--startup-timeout-seconds", type=float, default=120.0)
-    run.add_argument("--timeout-seconds", type=float, default=1200.0)
+    for name in ("run", "send"):
+        command = commands.add_parser(name, help="register a task; watch submits it when the worker is ready")
+        command.add_argument("--request", type=Path, required=True)
+        command.add_argument("--session", required=True)
+        command.add_argument("--task-file", type=Path, required=True)
+        command.add_argument("--receipt", type=Path, required=True)
+        command.add_argument("--token", required=True)
+    commands.choices["run"].add_argument("--binary")
 
-    send = commands.add_parser("send", help="submit a follow-up to the same session")
-    send.add_argument("--session", required=True)
-    send.add_argument("--task-file", type=Path, required=True)
-    send.add_argument("--receipt", type=Path, required=True)
-    send.add_argument("--token", required=True)
-    send.add_argument("--timeout-seconds", type=float, default=1200.0)
+    for name in ("watch", "recover", "choose", "stop"):
+        command = commands.add_parser(name)
+        command.add_argument("--request", type=Path, required=True)
+        command.add_argument("--session", required=True)
+    watch = commands.choices["watch"]
+    watch.add_argument("--wait-seconds", type=float, default=300)
+    watch.add_argument("--acknowledge", type=int)
+    recover = commands.choices["recover"]
+    recover.add_argument("--observation", type=int, required=True)
+    recover.add_argument("--reason", required=True)
+    recover.add_argument("--instruction-file", type=Path)
+    recover.add_argument("--interrupt", action="store_true")
+    choose = commands.choices["choose"]
+    choose.add_argument("--observation", type=int, required=True)
+    choose.add_argument("--reason", required=True)
+    choose.add_argument("--keys", nargs="+", required=True)
+    commands.choices["stop"].add_argument("--reason", required=True)
 
     for name in ("status", "capture", "close"):
         command = commands.add_parser(name)
         command.add_argument("--session", required=True)
     capture = commands.choices["capture"]
-    capture.add_argument("--history-lines", type=int, default=0)
+    capture.add_argument("--history-lines", type=int, default=DEFAULT_CAPTURE_HISTORY_LINES)
 
     complete = commands.add_parser("complete", help="atomically write a worker receipt")
     complete.add_argument("--receipt", type=Path, required=True)
@@ -293,50 +162,42 @@ def main(adapter: AgentAdapter, argv: Sequence[str] | None = None) -> int:
         if args.command == "complete":
             if args.receipt.exists():
                 raise WorkerError(f"receipt already exists: {args.receipt}")
+            read_worker_result(args.receipt)
+            if not args.summary.strip():
+                raise WorkerError("summary must not be empty")
             atomic_write_json(
                 args.receipt.resolve(),
                 WorkerReceipt(args.token, args.status, args.summary).to_json(),
             )
-            _emit({"schema_version": 1, "status": "receipt_written", "receipt": str(args.receipt)})
+            _emit({
+                "schema_version": 1,
+                "status": "receipt_written",
+                "receipt": str(args.receipt.resolve()),
+                "result_file": str(worker_result_path(args.receipt).resolve()),
+            })
             return 0
-        if args.command == "run":
-            session = TmuxSession.create(
-                name=args.session,
-                workspace=args.workspace,
-                agent=adapter.kind,
-                command=adapter.resolve_command(args.binary),
-            )
-            try:
-                wait_until_ready(session, adapter, timeout_seconds=args.startup_timeout_seconds)
-                _emit(
-                    submit(
-                        session=session,
-                        adapter=adapter,
-                        task_file=args.task_file,
-                        receipt_file=args.receipt,
-                        token=args.token,
-                        script=script,
-                        timeout_seconds=args.timeout_seconds,
-                    )
+        if args.command in {"run", "send", "watch", "recover", "choose", "stop"}:
+            supervisor = Supervisor(args.request, adapter, args.session)
+            if args.command in {"run", "send"}:
+                value = supervisor.start(
+                    task_file=args.task_file, receipt_file=args.receipt, token=args.token,
+                    submission=_submission_prompt(task_file=args.task_file.resolve(), script=script,
+                                                  receipt=args.receipt.resolve(), token=args.token),
+                    command=adapter.resolve_command(args.binary) if args.command == "run" else None,
                 )
-                return 0
-            except Exception:
-                # 失败会话保留给 DSH 或调用方排查，不能在异常路径中销毁现场。
-                raise
+            elif args.command == "watch":
+                value = supervisor.watch(wait_seconds=args.wait_seconds, acknowledge=args.acknowledge)
+            elif args.command == "recover":
+                value = supervisor.recover(observation=args.observation, reason=args.reason,
+                                           instruction_file=args.instruction_file, interrupt=args.interrupt)
+            elif args.command == "choose":
+                value = supervisor.choose(observation=args.observation, keys=args.keys, reason=args.reason)
+            else:
+                value = supervisor.stop(reason=args.reason)
+            _emit(value)
+            return 0
         session = TmuxSession.attach(name=args.session, expected_agent=adapter.kind)
-        if args.command == "send":
-            _emit(
-                submit(
-                    session=session,
-                    adapter=adapter,
-                    task_file=args.task_file,
-                    receipt_file=args.receipt,
-                    token=args.token,
-                    script=script,
-                    timeout_seconds=args.timeout_seconds,
-                )
-            )
-        elif args.command == "status":
+        if args.command == "status":
             _emit({"schema_version": 1, **session.status().to_json()})
         elif args.command == "capture":
             _emit(
@@ -350,6 +211,6 @@ def main(adapter: AgentAdapter, argv: Sequence[str] | None = None) -> int:
             session.close()
             _emit({"schema_version": 1, "status": "closed", "session": args.session})
         return 0
-    except (WorkerError, TmuxError, RecordError, OSError) as exc:
+    except (WorkerError, SupervisionError, TmuxError, RecordError, OSError, ValueError) as exc:
         print(f"{adapter.kind}_session: {exc}", file=sys.stderr)
         return 1

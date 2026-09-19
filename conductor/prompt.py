@@ -20,7 +20,6 @@ def _agent_commands(
     agent: AgentState,
     *,
     skill_script: Path,
-    attempt_timeout_seconds: int,
     available: bool,
 ) -> str:
     # 命令由 conductor 预先完整生成，避免 DSH 在关键路径上自行拼接路径或 token。
@@ -30,8 +29,8 @@ def _agent_commands(
             "python3.13",
             str(skill_script),
             "run",
-            "--workspace",
-            str(state.workspace),
+            "--request",
+            str(state.request_file),
             "--session",
             agent.session,
             "--task-file",
@@ -40,8 +39,6 @@ def _agent_commands(
             str(first.receipt_file),
             "--token",
             first.token,
-            "--timeout-seconds",
-            str(attempt_timeout_seconds),
         ]
     )
     retry_commands: list[str] = []
@@ -51,6 +48,8 @@ def _agent_commands(
                 "python3.13",
                 str(skill_script),
                 "send",
+                "--request",
+                str(state.request_file),
                 "--session",
                 agent.session,
                 "--task-file",
@@ -59,22 +58,23 @@ def _agent_commands(
                 str(attempt.receipt_file),
                 "--token",
                 attempt.token,
-                "--timeout-seconds",
-                str(attempt_timeout_seconds),
             ]
         )
         retry_commands.append(
-            f"第 {attempt.number} 轮任务文件：`{attempt.task_file}`\n\n```bash\n{command}\n```"
+            f"第 {attempt.number} 轮任务文件：`{attempt.task_file}`\n"
+            f"本轮完整结果文件：`{attempt.result_file}`\n\n```bash\n{command}\n```"
         )
-    close_command = _command(
-        ["python3.13", str(skill_script), "close", "--session", agent.session]
-    )
     retries = "\n\n".join(retry_commands) or "没有可用的返工轮次。"
+    controls = "\n".join(
+        f"- `{name}`：`{_command(['python3.13', str(skill_script), name, '--request', str(state.request_file), '--session', agent.session])}`"
+        for name in ("watch", "recover", "choose", "stop")
+    )
     return f"""### {agent.kind.value}
 
 - 可执行文件状态：{"可用" if available else "当前环境中不可用"}
 - 必须加载的 skill：`{agent.kind.skill_name}`
 - 首轮任务文件：`{first.task_file}`
+- 首轮完整结果文件：`{first.result_file}`
 - tmux 会话：`{agent.session}`
 
 首轮精确命令：
@@ -87,11 +87,9 @@ def _agent_commands(
 
 {retries}
 
-关闭会话精确命令：
+监督命令（按 skill 补充 observation、reason 等参数）：
+{controls}
 
-```bash
-{close_command}
-```
 """
 
 
@@ -101,8 +99,9 @@ def build_prompt(
     skill_scripts: Mapping[AgentKind, Path],
     available_agents: Set[AgentKind],
     max_attempts: int,
-    attempt_timeout_seconds: int,
+    worker_idle_timeout_seconds: int,
     keep_session: bool,
+    sdk_heartbeat_counts_as_activity: bool = True,
 ) -> str:
     plan_example = {
         "schema_version": 1,
@@ -139,16 +138,20 @@ def build_prompt(
             state,
             state.agent_state(kind),
             skill_script=skill_scripts[kind],
-            attempt_timeout_seconds=attempt_timeout_seconds,
             available=kind in available_agents,
         )
         for kind in AgentKind
     )
     availability = ", ".join(kind.value for kind in AgentKind if kind in available_agents) or "无"
+    heartbeat_rule = (
+        "SDK waiting 心跳也重置计时；持续心跳会阻止静默超时，但不代表 worker 正常，仍须检查 watch 周期返回的屏幕。"
+        if sdk_heartbeat_counts_as_activity else
+        "本次配置排除 SDK waiting 心跳，它不重置 worker 静默计时。"
+    )
     close_instruction = (
-        "写入 verdict 后保留所选 worker 的 tmux 会话。"
+        "写入 verdict 后保留所选 worker 的 tmux 会话，供 SDK 补采和调用方观察。"
         if keep_session
-        else "verdict 原子落盘后，使用所选 agent 对应的精确 close 命令关闭 tmux 会话。"
+        else "verdict 原子落盘后不要关闭 tmux 会话；SDK 会在结束补采和结果校验后关闭所选会话。"
     )
     return f"""你是本次编码任务的唯一管理者、任务拆解者和独立验收者。
 
@@ -177,15 +180,46 @@ Codex，必须服从该选择；若未明确指定，则根据任务特征和当
 
 根据 plan 中选定的 agent，只加载对应的 skill。把任务摘要、实施步骤、必要上下文和预期结果
 写入该 agent 第 1 轮的 task 文件，然后执行下方对应的精确 run 命令。不得自行修改工作区产物。
+任务文件必须要求 worker 把完整回答、关键结论、修改记录、检查结果和阻塞信息写入本轮
+result.md；重要内容及时落盘，长检查输出另存本轮目录的文件并在 result.md 中给出路径。
+worker 必须在最终结果文件原子落盘后才写 receipt，不能把关键内容只留在终端。
 
-worker 命令只有在收到 token-bound receipt 后才成功返回。receipt 只证明 worker 已交回控制权，
-不证明任务正确。不得从终端文字、worker 自述或屏幕稳定状态推断完成或成功。
+run/send 只登记本轮任务并立即返回，不能把命令返回视为 worker 完成。随后持续调用 watch，
+每次最多等待 300 秒（执行工具超时应设置为至少 330 秒）。不要把命令转入长期后台 job_output
+等待；watch 返回 running 时继续 watch，不能重复 run/send。watch 在就绪后自动提交已登记的任务。
+
+连续 {worker_idle_timeout_seconds} 秒没有任何计入活动的输出或界面变化时，watch 返回 needs_attention。
+任何 worker 终端字节、重复错误、spinner、计时器、光标变化均重置静默计时；不是“有价值内容”判定。
+{heartbeat_rule}
+菜单、明显连接/工具错误、无效回执或 worker 退出可以提前触发 needs_attention。
+watch 每次到期都会返回当前屏幕、observation id 和快照；即使 status=running 也必须检查。
+如果 worker 已回到输入框、声称结束却没有有效文件，根据证据 recover 补齐或 stop 结束，不能因心跳继续而忽视。
+
+你必须根据返回的当前屏幕、snapshot_file、实际文件和进程状态做判断：
+- 网络/模型连接暂时失败：确认输入界面可用后用 recover 继续原任务；必要时显式 --interrupt。
+- 输入框等待选择：由你根据用户任务选择，使用 choose 提供精确按键及理由，不一律选 Yes。
+- 声称完成却缺 result.md/receipt：检查实际文件，用 recover 要求补齐；无效回执会先归档再由 worker 重写。
+- 明确失败、工具不可用且无法恢复、凭据缺失或恢复额度耗尽：用 stop 保存末屏并终止 worker，
+  然后直接写 rejected verdict。无需也不得伪造 receipt；没有 receipt 不妨碍宣告失败。
+- 如果只是历史错误而 worker 正常继续：用 watch --acknowledge <observation id> 继续观察，
+  这不会重置静默时钟，也不替代有效回执。
+
+recover 与反复卡住的菜单选择共享 request 规定的恢复预算，整个 run 最多 5 次；次数不随重启 watch
+或业务返工清零。首次普通菜单选择不消耗恢复次数。每次操作后重新观察结果，不连续堆积“继续”。
+确有正常长命令运行时可以继续观察，但受全局超时约束；遇到静默不能无证据无限循环等待。
+恢复沿用当前 task/receipt/token；只有收到有效回执并完成独立验收后，业务返工才使用下一个 attempt。
+
+只有 watch 返回 receipt_ready 才代表收到 token-bound receipt；receipt 只证明 worker 已交回控制权，
+不证明任务正确。终端文字可以用于诊断、恢复、选择和失败决定，不能作为成功依据。
+完整内容必须从 request 中本轮预定的 result_file 及其引用文件读取，不能从 tmux 拼接恢复。
 
 {command_sections}
 
 ## 3. 独立验收与返工
 
-每轮 receipt 到达后，必须由你亲自读取工作区产物，并运行足以验证 plan 中每一个验收项的命令。
+每轮 receipt 到达后，先完整读取本轮 result.md 和与任务相关的引用文件；若文件很长，分段读取
+直到读完，不能只读取 head/tail 或工具截断后的片段。缺失或空结果文件不能作为有效交接。
+然后必须由你亲自读取工作区产物，并运行足以验证 plan 中每一个验收项的命令。
 记录具体方法与证据，不能复制 worker 的自述作为证据。若验收失败且还有轮次，把失败的验收项
 ID、你的观察证据和明确修正要求写入所选 agent 的下一轮 task 文件，再执行对应精确 send 命令。
 每轮返工后重新验证相关验收项，最多提交 {max_attempts} 轮。
@@ -204,6 +238,7 @@ verdict 的 `agent` 必须与 plan 一致；`checks` 必须且只能覆盖 plan 
 验证所有 check 均通过时才能写 accepted。rejected 必须包含非空 `remaining_issues`。
 `artifacts` 只能使用工作区内的相对路径，`attempts` 是实际提交给 worker 的轮数。
 
-{close_instruction}
+rejected 前必须 stop；keep_session 只允许保留正常验收结束的会话。全局超时由 SDK 停止 worker 并保留诊断文件。
+正常验收结束时：{close_instruction}
 最后输出一段简短总结，但调用方只以 plan、receipt、DSH 协议完成事件和 verdict 文件为事实。
 """

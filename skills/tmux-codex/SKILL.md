@@ -1,59 +1,105 @@
 ---
 name: tmux-codex
-description: 在 tmux 中启动并控制交互式 Codex 会话，提交首轮或后续编码任务，等待绑定 token 的交接回执，查看终端并关闭会话。用于必须保留在可 attach tmux 会话中的 Codex 委派任务；不要用于 Claude Code 会话。
+description: 在 tmux 中监督 Codex，提交任务、观察活动与回执、恢复连接故障、代做交互选择并保存失败证据。用于 DSH 委派给 Codex 的编码任务。
 ---
 
-# 在 tmux 中运行 Codex
+# 在 tmux 中监督 Codex
 
-通过 Python 3.13 运行 `scripts/codex_session.py`。控制器使用
-`--dangerously-bypass-approvals-and-sandbox --no-alt-screen` 启动 Codex，处理 Codex 的启动菜单，
-并给 tmux 会话写入 agent 标记，避免 Claude 控制器误连接到该会话。
+通过 Python 3.13 运行 `scripts/codex_session.py`，使用 `--dangerously-bypass-approvals-and-sandbox --no-alt-screen` 启动 worker。
+只控制 request/plan 指定的本 agent 会话和工作区，所有返工沿用该会话。不得改用另一 agent。
+会话名精确匹配，读屏与输入绑定启动时的 worker pane；切换观察窗口不会改变控制目标。
 
-## 提交任务
+## 委派与文件交接
 
-管理者会提供所有路径和 token。任务内容必须通过 `--task-file` 传入，不能把任务文本插入 shell
-命令。控制器会让 worker 直接读取该文件，只向 TUI 提交短交接指令，避免长任务正文在交互式
-编辑器中被截断。
+管理者提供 request、任务文件、receipt 路径和 token，优先原样使用管理者生成的精确命令。
+任务正文留在 task 文件中，只将读取文件和交接协议的短指令通过 tmux buffer/paste 传入 TUI。
 
 ```bash
 python3.13 <skill>/scripts/codex_session.py run \
-  --workspace /absolute/workspace \
+  --request /absolute/run/request.json \
   --session dsh-codex-unique \
   --task-file /absolute/attempt/task.md \
   --receipt /absolute/attempt/receipt.json \
-  --token UNIQUE_TOKEN \
-  --timeout-seconds 1200
+  --token UNIQUE_TOKEN
 ```
 
-`run` 只有在 worker 使用指定 token 写出合法回执后才返回。回执只表示 worker 已交回控制权，
-不证明任务正确。接受任务前必须由管理者独立检查和测试工作区。
+`run` 立即登记任务并返回 `starting`；随后必须 `watch`，由 watch 在输入界面就绪后提交任务。
+不要把 run 的返回当成完成，不要因 watch 返回 running 而重新 run。只有收到有效回执且独立
+验收后需要业务返工，才使用 `send`，参数与 run 相同，但取 request 中下一轮的文件和新 token。
 
-控制器会等待输入界面稳定，避免延迟出现的目录信任菜单截断任务。若提交后仍出现启动菜单，
-控制器会处理菜单、清空残留输入并完整重投一次任务与交接指令。长文本粘贴完成后还会进行一次
-有界补交，避免首个 Enter 早于编辑器完成展开。
+每轮 worker 必须将完整回答、关键结论、修改记录、检查结果、阻塞信息写入 receipt 同目录的
+非空 UTF-8 `result.md`。重要内容及时落盘，长检查输出另存文件并在报告中引用。最终报告先写
+临时文件再原子替换，然后运行控制器提供的 `complete` 命令。`blocked` 也需保存报告。
+终端只显示简短进度和路径。收到回执后，DSH 必须读完整报告及相关引用文件，再独立验收工作区。
 
-需要返工时，将修正要求写入新的任务文件，并在同一个会话中使用新的回执路径和 token：
+## 有界观察与判断
 
 ```bash
-python3.13 <skill>/scripts/codex_session.py send \
-  --session dsh-codex-unique \
-  --task-file /absolute/attempt-2/task.md \
-  --receipt /absolute/attempt-2/receipt.json \
-  --token NEW_UNIQUE_TOKEN \
-  --timeout-seconds 1200
+python3.13 <skill>/scripts/codex_session.py watch \
+  --request /absolute/run/request.json --session dsh-codex-unique --wait-seconds 60
 ```
 
-## 观察与清理
+watch 每 10 秒检查一次，单次最多等待 300 秒；工具执行超时应大于等待时间至少 30 秒。
+同步调用，不转入长期后台 `job_output` 等待。每次返回后先检查 status、当前屏幕、快照和实际文件：
+
+| status | 管理者下一步 |
+|---|---|
+| `running` | 检查返回的屏幕和 observation，任务继续则再次 watch；已停在输入框却无文件则诊断、补交 |
+| `needs_attention` | 根据 reason、屏幕和 snapshot_file 决定观察、选择、恢复或结束 |
+| `receipt_ready` | 有效 token 回执与结果文件已就绪，读取文件并独立验收；blocked 表示报告阻塞 |
+| `stopped` | worker 已结束，记录失败证据并写 rejected verdict |
+
+默认连续 300 秒没有计入活动的变化才触发 `silent`。spinner、计时器、重复错误、终端输出字节、
+光标位置或显示模式变化都算活动；无需判断内容价值。仅客户端本地绘制的光标闪烁不可从 tmux
+读取，不凭空产生活动。SDK waiting 心跳默认也计入；request 中
+`sdk_heartbeat_counts_as_activity=false` 时才排除。持续心跳会阻止静默超时，仍须检查每次
+watch 到期返回的屏幕；不能因 SDK 还活着就认定 worker 正常。整个任务仍受 SDK 总时限约束。
+
+菜单、错误提示、无效回执、worker 退出或监测管道失效会提前返回。错误匹配只是诊断线索，
+不自动判失败。历史错误若已恢复，使用 `watch --acknowledge <id>` 继续观察；静默时间不清零。
+若静默时有证据表明长命令正常执行，同样可 acknowledge，在本次 watch 时段内暂缓再次提醒。
+
+## 主动恢复与选择
 
 ```bash
+python3.13 <skill>/scripts/codex_session.py recover \
+  --request /absolute/run/request.json --session dsh-codex-unique \
+  --observation 3 --reason '连接已恢复，继续当前任务'
+
+python3.13 <skill>/scripts/codex_session.py choose \
+  --request /absolute/run/request.json --session dsh-codex-unique \
+  --observation 4 --keys Down Enter --reason '选择符合任务要求的选项'
+```
+
+recover 默认发送“继续当前任务”及原任务交接协议，也可用 `--instruction-file` 提供补齐文件的
+具体要求。仍在忙时不能盲目堆积输入；有证据需要中断才能恢复时显式加 `--interrupt`。
+恢复沿用当前 attempt/token，不得跳到新一轮或伪造回执。无效回执先归档，由 worker 重写。
+若有效回执已到达，控制器拒绝恢复，转入验收。
+
+DSH 代为判断交互选择，明确当前选项及理由，再发送按键；不能一律选 Yes。屏幕变化导致
+observation 过期时重新 watch。Codex 的 `[Pasted Content N chars]` 表示可能尚未提交，可经
+观察用 choose 发送 Enter。每次操作后都要观察是否生效。
+
+主动恢复和反复卡住的菜单共享整个 run 的恢复预算，最多 5 次；首次普通菜单确认免费，
+仅移动选项或勾选复选框不消耗恢复次数。
+次数保存在 supervision.json，watch 重启及业务返工均不重置。预算用尽不得改文件绕过，必须结束。
+网络/模型暂时故障可恢复；明确失败、无法修复的工具或凭据问题应结束，无需等待 receipt。
+
+## 结束与排查
+
+```bash
+python3.13 <skill>/scripts/codex_session.py stop \
+  --request /absolute/run/request.json --session dsh-codex-unique --reason '已无法恢复'
+python3.13 <skill>/scripts/codex_session.py capture --session dsh-codex-unique --history-lines 50000
 python3.13 <skill>/scripts/codex_session.py status --session dsh-codex-unique
-python3.13 <skill>/scripts/codex_session.py capture --session dsh-codex-unique
-python3.13 <skill>/scripts/codex_session.py close --session dsh-codex-unique
 ```
 
-控制器结果全部以 JSON 输出到 stdout，诊断信息输出到 stderr。超时或启动失败时，会话会保留
-以便排查。可以使用 JSON 结果中的 `attach_command` 连接，并用 `Ctrl-b d` 脱离。
+stop 先保存最多 50000 行历史，再停止会话，留下审计记录。失败时先 stop 再写 rejected verdict，
+没有 receipt 不妨碍失败结论。正常验收后保留会话给 SDK 补采，再由 SDK 按 keep_session 配置清理；
+失败和总超时必须停止 worker，即使 keep_session=true，诊断文件仍保留。
 
-不要把终端画面稳定或 Codex 的自然语言回复当作完成信号。此 skill 暴露的唯一完成信号是
-绑定 token 的回执文件。Codex 可能先显示 `[Pasted Content N chars]`，控制器会在该明确标记
-仍存在时等待并重发一次 Enter；不要用屏幕静止替代回执判断。
+capture 默认读取当前屏幕及最近 5000 行历史，`--history-lines 0` 只看当前屏幕；历史上限 50000。
+Codex 的 --no-alt-screen 有助于保留历史，但重绘与历史容量仍可能造成遗漏。长文完整性由 result.md 及引用文件保障，屏幕仅用于状态和诊断。
+控制器 stdout 为 JSON、stderr 为诊断。屏幕文字、文件出现或静止不能替代 token 回执，更不能
+替代 DSH 独立 verdict。监督状态、恢复次数与操作依据见 run 目录的 supervision.json、
+supervision.jsonl 和 observations/。

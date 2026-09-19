@@ -396,7 +396,7 @@ class DshClient:
             },
             timeout_seconds=min(60.0, timeout_seconds),
         )
-        finished = self._turn_finished.wait(timeout_seconds)
+        finished = self._turn_finished.wait(max(0.0, timeout_seconds - (time.monotonic() - started)))
         elapsed = time.monotonic() - started
         process_exited = self._process_exited.is_set()
         reason_kind = (self._turn_end_reason or {}).get("kind")

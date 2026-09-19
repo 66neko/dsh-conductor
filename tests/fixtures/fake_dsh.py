@@ -55,6 +55,10 @@ for line in sys.stdin:
                 attempt = selected["attempts"][0]
                 workspace = Path(request_data["workspace"])
                 (workspace / "fixture.txt").write_text("ok\n", encoding="utf-8")
+                if not os.environ.get("FAKE_DSH_MISSING_RESULT"):
+                    Path(attempt["result_file"]).write_text(
+                        "已创建 fixture.txt，完整检查结果：内容为 ok。\n", encoding="utf-8"
+                    )
                 receipt = {
                     "schema_version": 1,
                     "token": attempt["token"],
@@ -89,6 +93,11 @@ for line in sys.stdin:
                     "summary": "fixture accepted",
                     "remaining_issues": [],
                 }
+                if os.environ.get("FAKE_DSH_REJECTED"):
+                    verdict.update(status="rejected", summary="fixture failed", remaining_issues=["worker unavailable"])
+                    verdict["checks"][0]["passed"] = False
+                    Path(attempt["receipt_file"]).unlink()
+                    Path(attempt["result_file"]).unlink(missing_ok=True)
                 Path(request_data["verdict_file"]).write_text(json.dumps(verdict), encoding="utf-8")
         emit({"jsonrpc": "2.0", "id": request_id, "result": {"queued": True}})
         event = {

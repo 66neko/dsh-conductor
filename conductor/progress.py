@@ -7,7 +7,10 @@ import queue
 import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Sequence
+
+from .state import atomic_write_json
 
 type JsonObject = dict[str, Any]
 type EventCallback = Callable[["RunEvent"], None]
@@ -72,9 +75,15 @@ class ProgressReporter:
         *,
         on_event: EventCallback | None = None,
         heartbeat_seconds: float = 10.0,
+        heartbeat_file: Path | None = None,
+        supervision_log: Path | None = None,
     ) -> None:
         self.on_event = on_event
         self.heartbeat_seconds = heartbeat_seconds
+        self.heartbeat_file = heartbeat_file
+        self.supervision_log = supervision_log
+        self._journal_offset = 0
+        self._journal_lock = threading.Lock()
         self._started = time.monotonic()
         self._last_output = self._started
         self._current_tool: str | None = None
@@ -95,6 +104,7 @@ class ProgressReporter:
                 daemon=True,
             )
             self._dispatch_thread.start()
+        if self.on_event is not None or self.heartbeat_file is not None or self.supervision_log is not None:
             self._heartbeat_thread = threading.Thread(
                 target=self._heartbeat,
                 name="dsh-heartbeat",
@@ -107,6 +117,7 @@ class ProgressReporter:
         self._stop.set()
         if self._heartbeat_thread is not None:
             self._heartbeat_thread.join(timeout=2)
+        self.read_supervision()
         if self._dispatch_thread is not None:
             self._events.put(_STOP)
             self._dispatch_thread.join(timeout=2)
@@ -119,8 +130,8 @@ class ProgressReporter:
         message: str,
         raw: JsonObject | None = None,
     ) -> None:
-        if self.on_event is None:
-            return
+        if kind == "heartbeat" and self.heartbeat_file is not None:
+            atomic_write_json(self.heartbeat_file, {"last_output_at": time.time()})
         with self._lock:
             event = RunEvent(
                 elapsed_seconds=time.monotonic() - self._started,
@@ -131,7 +142,35 @@ class ProgressReporter:
             )
             self._last_output = time.monotonic()
         # DSH 协议线程只入队，用户回调的耗时不会阻塞后续 JSON-RPC 帧。
-        self._events.put(event)
+        if self.on_event is not None:
+            self._events.put(event)
+
+    def read_supervision(self) -> None:
+        """转发审计事件；不采集屏幕，不改变 worker 活动时间。"""
+        if self.supervision_log is None:
+            return
+        with self._journal_lock:
+            try:
+                with self.supervision_log.open(encoding="utf-8") as handle:
+                    handle.seek(self._journal_offset)
+                    while line := handle.readline():
+                        if not line.endswith("\n"):
+                            break
+                        self._journal_offset = handle.tell()
+                        try:
+                            record = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if not isinstance(record, dict):
+                            continue
+                        event = record.get("event", "unknown")
+                        message = str(record.get("message", event))
+                        if event == "recovery":
+                            message = f"recovery {record.get('recoveries')}/{record.get('max_recoveries', 5)}: {message}"
+                        self.emit(source="conductor", kind=f"supervision_{event}", message=message, raw=record)
+            except OSError:
+                # 展示故障不影响持久化监督状态与 DSH 判定。
+                return
 
     def _dispatch_events(self) -> None:
         while True:
@@ -151,6 +190,7 @@ class ProgressReporter:
 
     def _heartbeat(self) -> None:
         while not self._stop.wait(0.5):
+            self.read_supervision()
             if time.monotonic() - self._last_output < self.heartbeat_seconds:
                 continue
             if self._current_tool:

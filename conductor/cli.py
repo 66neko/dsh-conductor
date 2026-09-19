@@ -22,6 +22,7 @@ from .skills import (
     source_skill,
 )
 from .state import default_state_root
+from .worker_log import DEFAULT_WORKER_LOG_INTERVAL_SECONDS
 
 type JsonObject = dict[str, Any]
 
@@ -107,7 +108,9 @@ def cmd_run(args: argparse.Namespace) -> int:
             provider=args.provider,
             model=args.model,
             max_attempts=args.max_attempts,
-            attempt_timeout_seconds=args.attempt_timeout_seconds,
+            worker_idle_timeout_seconds=args.worker_idle_timeout_seconds,
+            max_recovery_attempts=args.max_recovery_attempts,
+            sdk_heartbeat_counts_as_activity=args.sdk_heartbeat_counts_as_activity,
             timeout_seconds=args.timeout_seconds,
             keep_session=args.keep_session,
             heartbeat_seconds=args.heartbeat_seconds,
@@ -157,7 +160,7 @@ def cmd_show(args: argparse.Namespace) -> int:
         _json({"schema_version": 1, "status": "error", "error": str(exc)})
         return 1
     output: JsonObject = {"schema_version": 1, "run_directory": str(run_root), "request": request}
-    for name in ("user-prompt.md", "manager-prompt.md", "plan.json", "verdict.json", "worker-screen.log"):
+    for name in ("user-prompt.md", "manager-prompt.md", "plan.json", "verdict.json", "supervision.json", "supervision.jsonl", "worker-screen.log"):
         path = run_root / name
         if not path.exists():
             continue
@@ -166,6 +169,8 @@ def cmd_show(args: argparse.Namespace) -> int:
                 output[path.stem] = read_json_object(path)
             except RecordError as exc:
                 output[f"{path.stem}_error"] = str(exc)
+        elif path.suffix == ".jsonl":
+            output["supervision_log"] = str(path)
         elif path.suffix == ".log":
             output["worker_log"] = str(path)
         else:
@@ -202,7 +207,10 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--workspace", type=Path, required=True)
     run.add_argument("--prompt", type=_non_empty, required=True)
     run.add_argument("--max-attempts", type=_positive, default=2)
-    run.add_argument("--attempt-timeout-seconds", type=_positive, default=1200)
+    run.add_argument("--worker-idle-timeout-seconds", type=_positive, default=300)
+    run.add_argument("--sdk-heartbeat-counts-as-activity", action=argparse.BooleanOptionalAction, default=True,
+                     help="SDK 心跳计入活动（默认开启）；持续心跳会阻止静默超时")
+    run.add_argument("--max-recovery-attempts", type=_positive, default=5)
     run.add_argument("--timeout-seconds", type=_positive_float, default=3600.0)
     run.add_argument("--provider", default="deepseek-official")
     run.add_argument("--model", default="deepseek-flash")
@@ -216,8 +224,8 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--worker-log-interval-seconds",
         type=_positive_float,
-        default=5.0,
-        help="tmux worker 屏幕采样间隔，默认 5 秒",
+        default=DEFAULT_WORKER_LOG_INTERVAL_SECONDS,
+        help="tmux worker 屏幕采样间隔，默认 10 秒；结束时立即补采",
     )
     run.set_defaults(func=cmd_run)
     install = commands.add_parser("install-skills", help="将两个 skill 复制到指定 workspace")

@@ -10,10 +10,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Callable, Sequence
 
-from .tmux import TmuxError, TmuxSession
+from .tmux import DEFAULT_CAPTURE_HISTORY_LINES, HISTORY_LIMIT, TmuxError, TmuxSession
 
 type LogSink = Callable[[str, Sequence[str]], None]
 
+DEFAULT_WORKER_LOG_INTERVAL_SECONDS = 10.0
 _LOG_WRITE_LOCK = threading.Lock()
 
 _CONTROL_CHARACTERS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
@@ -53,7 +54,7 @@ def _is_handoff_noise(line: str) -> bool:
 
 
 def _canonicalize_dynamic_status(line: str) -> str:
-    # 计时和 spinner 不是任务进展；归一化后只有实际文本变化才会再次输出。
+    # 仅减少展示噪声；监督时钟独立统计原始活动，计时和 spinner 仍算活动。
     line = _LEADING_ACTIVITY.sub(r"\1*", line)
     line = _WORKING_TIMER.sub("Working (...", line)
     return _BRAILLE_SPINNER.sub("*", line)
@@ -82,22 +83,45 @@ def changed_screen_lines(
     previous: Sequence[str],
     current: Sequence[str],
     *,
-    max_lines: int,
+    max_lines: int | None = None,
 ) -> tuple[str, ...]:
-    """提取新出现或被替换的屏幕行，并限制单次输出规模。"""
+    """提取新增或替换的行；落盘默认保留全部，展示时才去重和限行。"""
 
-    if max_lines <= 0 or not current:
+    if (max_lines is not None and max_lines <= 0) or not current:
         return ()
+    # 常见状态更新只改动尾部。先排除相同前后缀，避免大量重复历史行拖慢 diff。
+    start = 0
+    limit = min(len(previous), len(current))
+    while start < limit and previous[start] == current[start]:
+        start += 1
+    old_end, new_end = len(previous), len(current)
+    while old_end > start and new_end > start and previous[old_end - 1] == current[new_end - 1]:
+        old_end -= 1
+        new_end -= 1
+    previous, current = previous[start:old_end], current[start:new_end]
+    if len(previous) * len(current) > 1_000_000:
+        # 大量重复行的精细 diff 为二次复杂度，可能拖慢采样及退出。
+        # 此时保留变化区域的完整上下文，允许日志重复但不能截掉末尾输出。
+        changed = tuple(current)
+        return changed if max_lines is None else _display_lines(changed, max_lines=max_lines)
     matcher = difflib.SequenceMatcher(None, previous, current, autojunk=False)
     changed: list[str] = []
     for tag, _old_start, _old_end, new_start, new_end in matcher.get_opcodes():
         if tag in {"insert", "replace"}:
             changed.extend(current[new_start:new_end])
 
-    # TUI 重绘可能在同一屏幕重复一行；单次事件只展示一次，保留最后的上下文。
+    if max_lines is None:
+        return tuple(changed)
+    return _display_lines(changed, max_lines=max_lines)
+
+
+def _display_lines(lines: Sequence[str], *, max_lines: int) -> tuple[str, ...]:
+    # TUI 重绘可能在同一屏幕重复一行；只限制实时展示，不能因此丢弃持久化日志。
+    if max_lines <= 0:
+        return ()
     unique: list[str] = []
     seen: set[str] = set()
-    for line in changed:
+    for line in lines:
         key = line.strip()
         if not key or key in seen:
             continue
@@ -116,8 +140,8 @@ class WorkerLogFollower:
         agent: str,
         log_file: Path,
         sink: LogSink,
-        interval_seconds: float = 5.0,
-        history_lines: int = 200,
+        interval_seconds: float = DEFAULT_WORKER_LOG_INTERVAL_SECONDS,
+        history_lines: int = DEFAULT_CAPTURE_HISTORY_LINES,
         max_lines_per_update: int = 12,
     ) -> None:
         self.session_name = session_name
@@ -146,10 +170,10 @@ class WorkerLogFollower:
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=self.interval_seconds + 2.0)
-        # DSH 结束与 tmux 最后一次重绘可能紧邻，停止前再采样一次以减少尾部丢失。
+        # 不等待下个周期；结束时扩大到全部可保留历史，补采最后一次轮询之后的长输出。
         if not self._disabled:
             try:
-                self.sample_once()
+                self.sample_once(history_lines=HISTORY_LIMIT)
             except OSError:
                 pass
 
@@ -164,18 +188,20 @@ class WorkerLogFollower:
                 return
             self._stop.wait(self.interval_seconds)
 
-    def sample_once(self) -> tuple[str, ...]:
+    def sample_once(self, *, history_lines: int | None = None) -> tuple[str, ...]:
         with self._sample_lock:
-            return self._sample_once_locked()
+            return self._sample_once_locked(history_lines=history_lines)
 
-    def _sample_once_locked(self) -> tuple[str, ...]:
+    def _sample_once_locked(self, *, history_lines: int | None = None) -> tuple[str, ...]:
         if self._disabled:
             return ()
         session = TmuxSession(self.session_name)
         try:
             if not session.exists():
                 return ()
-            current = normalize_screen(session.capture(history_lines=self.history_lines))
+            current = normalize_screen(session.capture(
+                history_lines=self.history_lines if history_lines is None else history_lines,
+            ))
         except TmuxError:
             # 会话可能在 exists 与 capture 之间被 DSH 正常关闭。
             return ()
@@ -184,14 +210,15 @@ class WorkerLogFollower:
         changed = changed_screen_lines(
             self._previous,
             current,
-            max_lines=self.max_lines_per_update,
         )
         self._previous = current
         if not changed:
             return ()
         self._append(changed)
-        self.sink(self.agent, changed)
-        return changed
+        displayed = _display_lines(changed, max_lines=self.max_lines_per_update)
+        if displayed:
+            self.sink(self.agent, displayed)
+        return displayed
 
     def _append(self, lines: Sequence[str]) -> None:
         self.log_file.parent.mkdir(parents=True, exist_ok=True)

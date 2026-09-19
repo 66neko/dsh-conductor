@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from .models import AgentKind, JsonObject
+from .models import AgentKind, JsonObject, worker_result_path
 
 
 def default_state_root(workspace: Path) -> Path:
@@ -36,11 +36,16 @@ class AttemptState:
     task_file: Path
     receipt_file: Path
 
+    @property
+    def result_file(self) -> Path:
+        return worker_result_path(self.receipt_file)
+
     def to_json(self) -> JsonObject:
         return {
             "number": self.number,
             "token": self.token,
             "task_file": str(self.task_file),
+            "result_file": str(self.result_file),
             "receipt_file": str(self.receipt_file),
         }
 
@@ -81,8 +86,10 @@ class RunState:
         prompt: str,
         available_agents: set[AgentKind],
         max_attempts: int,
-        attempt_timeout_seconds: int,
+        worker_idle_timeout_seconds: int,
         keep_session: bool,
+        max_recovery_attempts: int = 5,
+        sdk_heartbeat_counts_as_activity: bool = True,
     ) -> "RunState":
         if not prompt.strip():
             raise ValueError("prompt must not be empty")
@@ -132,7 +139,11 @@ class RunState:
             "verdict_file": str(verdict_file),
             "worker_log_file": str(worker_log_file),
             "max_attempts": max_attempts,
-            "attempt_timeout_seconds": attempt_timeout_seconds,
+            "worker_idle_timeout_seconds": worker_idle_timeout_seconds,
+            "max_recovery_attempts": max_recovery_attempts,
+            "sdk_heartbeat_counts_as_activity": sdk_heartbeat_counts_as_activity,
+            "supervision_file": str(root / "supervision.json"),
+            "supervision_log_file": str(root / "supervision.jsonl"),
             "keep_session": keep_session,
             "available_agents": [kind.value for kind in AgentKind if kind in available_agents],
             "agents": [item.to_json() for item in agent_states],
