@@ -52,9 +52,11 @@ def check_tmux(workspace: Path) -> None:
             require(time.monotonic() < deadline, "tmux 自检输出超时")
             time.sleep(0.05)
 
-        current = session.capture().splitlines()
-        recent = session.capture(history_lines=DEFAULT_CAPTURE_HISTORY_LINES).splitlines()
-        full = session.capture(history_lines=HISTORY_LIMIT).splitlines()
+        # tmux 3.2a 的 capture-pane -J 会保留行尾填充空格；只在自检比较时去掉，
+        # 与 WorkerLogFollower 的落盘格式一致，仍严格检查行数、内容及顺序。
+        current = [line.rstrip() for line in session.capture().splitlines()]
+        recent = [line.rstrip() for line in session.capture(history_lines=DEFAULT_CAPTURE_HISTORY_LINES).splitlines()]
+        full = [line.rstrip() for line in session.capture(history_lines=HISTORY_LIMIT).splitlines()]
         actual_limit = subprocess.run(
             ["tmux", "display-message", "-p", "-t", session.name, "#{history_limit}"],
             capture_output=True, text=True, check=True, timeout=10,
