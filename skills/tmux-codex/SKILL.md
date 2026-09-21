@@ -38,6 +38,16 @@ python3.13 <skill>/scripts/codex_session.py run \
 临时文件再原子替换，然后运行控制器提供的 `complete` 命令。`blocked` 也需保存报告。
 终端只显示简短进度和路径。收到回执后，DSH 必须读完整报告及相关引用文件，再独立验收工作区。
 
+当 request 的 `include_report=true` 时，控制器还会提供完整报告交接契约。worker 必须在本轮
+目录保存 `subtask-reports.json`（schema_version=1、绑定本轮 receipt_token、subtasks 数组）。
+没有内部子任务也要保存空数组；如有委派，开始前登记并持续更新所有层级子任务，父任务先登记。
+每项包含唯一 id、parent_id（直接子任务为 null）、agent（claude/codex）、title、status
+（running/completed/blocked/failed）和 report_file。本轮 `subtasks/` 下每份 UTF-8 文件保存对应
+子任务完整报告正文，不能只保存父任务摘要；不得使用绝对路径、越界路径或共用一个报告文件。
+先原子保存全部报告和清单，再提交 receipt。DSH 读取清单及全部子报告后独立验收。
+SDK 将全部实际轮次的 result.md、登记的子报告正文与可信 verdict 合并到 report 字段及 report.md；
+缺失或未完成项会显示 report_warnings，不据此改写业务 verdict。此模式不改变单 worker 会话规则。
+
 ## 有界观察与判断
 
 ```bash

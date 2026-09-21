@@ -129,6 +129,15 @@ python3.13 -m conductor run \
 | `dsh` | object | 是 | 本次 DSH 管理回合的协议摘要，格式见 [`dsh`](#dsh-对象)。 |
 | `worker_log` | string | 否 | `worker-screen.log` 的绝对路径。关闭采集或没有产生日志文件时字段会被省略，不会返回 `null`。 |
 | `worker_result` | string | 否 | 所选 agent 最后一轮 `result.md` 的绝对路径。未提交 worker 或本轮未生成文件时省略；报告须结合 verdict 判断，文件存在不代表通过验收。 |
+| `report` | string | 否 | 0.5.2 新增；include_report 开启时，全部实际轮次及已登记子任务报告正文与可信验收报告合并后的 Markdown。 |
+| `report_file` | string | 否 | 合并报告成功落盘时返回本轮 report.md 的绝对路径。 |
+| `report_warnings` | array[string] | 否 | 报告收集/持久化问题，仅非空时返回；不改变 status/verdict。 |
+
+完整报告默认关闭，SDK 使用 `ConductorConfig(include_report=True)`，CLI 使用 `--include-report`。
+完整正文直接位于 JSON 的 report 字符串中；worker_result 和 dsh.final_text 的原有含义不变。
+report 是返回前生成的固定快照，序列化不再读取文件。格式及内部子任务清单见[完整报告指南](full-report.md)。
+开启后，已有运行目录的 ConductorError 也尽力提供上述三个字段；未形成可信 verdict 时不能因
+磁盘上存在 verdict.json 就宣告验收通过。清理失败时 exc.result 中已有的可信报告继续保留。
 
 `TaskResult.accepted` 是 Python 对象上的便捷布尔属性，等价于
 `result.verdict.status == "accepted"`。它不会作为单独字段写入 JSON；JSON 调用方应检查

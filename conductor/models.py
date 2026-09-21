@@ -68,14 +68,14 @@ def _string_list(record: JsonObject, key: str, *, non_empty: bool = False) -> tu
     return tuple(value)
 
 
-def _read_text(path: Path, budget: Budget | None = None) -> str:
+def _read_text(path: Path, budget: Budget | None = None, *, preserve_newlines: bool = False) -> str:
     chunks = []
     # 非阻塞 open + fstat 拒绝 FIFO/设备，避免伪装成结果文件的管道无限等待。
     fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise RecordError(f"record must be a regular file: {path}")
-        handle = os.fdopen(fd, encoding="utf-8")
+        handle = os.fdopen(fd, encoding="utf-8", newline="" if preserve_newlines else None)
     except BaseException:
         os.close(fd)
         raise

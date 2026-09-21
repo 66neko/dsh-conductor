@@ -12,6 +12,21 @@ from conductor.cli import main
 
 
 class CliTests(unittest.TestCase):
+    def test_report_is_inline_in_single_cli_json(self) -> None:
+        fixture = Path(__file__).parent / "fixtures" / "fake_dsh.py"
+        with tempfile.TemporaryDirectory() as directory:
+            output = io.StringIO()
+            with (mock.patch.dict("os.environ", {"FAKE_DSH_SDK": "1"}),
+                  mock.patch("conductor.skills.shutil.which", return_value="/bin/true"),
+                  redirect_stdout(output), redirect_stderr(io.StringIO())):
+                code = main(["run", "--workspace", directory, "--prompt", "生成完整报告",
+                             "--include-report", "--dsh-bin", str(fixture), "--no-worker-log"])
+            payload = json.loads(output.getvalue())
+            self.assertEqual(code, 0)
+            self.assertIn("完整检查结果", payload["report"])
+            self.assertIn("## 二、任务验收报告", payload["report"])
+            self.assertEqual(payload["schema_version"], 1)
+
     def test_install_skills_targets_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory) / "workspace"
@@ -58,6 +73,7 @@ class CliTests(unittest.TestCase):
             output = json.loads(stdout.getvalue())
             self.assertEqual(code, 0)
             self.assertEqual(output["status"], "accepted")
+            self.assertNotIn("report", output)
             self.assertEqual(output["plan"]["agent"], "claude")
             self.assertEqual(
                 output["state_directory"].split("/runs/")[0],

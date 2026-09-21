@@ -102,6 +102,7 @@ def build_prompt(
     worker_idle_timeout_seconds: int,
     keep_session: bool,
     sdk_heartbeat_counts_as_activity: bool = True,
+    include_report: bool = False,
 ) -> str:
     plan_example = {
         "schema_version": 1,
@@ -153,6 +154,15 @@ def build_prompt(
         if keep_session
         else "verdict 原子落盘后不要关闭 tmux 会话；SDK 会在结束补采和结果校验后关闭所选会话。"
     )
+    report_instruction = """
+本次 include_report=true：SDK 将按执行轮次合并完整任务报告、内部子任务报告和验收报告。
+每轮 task 文件必须要求 worker 在 result.md 保存完整回答，并按控制器交接指令维护
+subtask-reports.json 和 subtasks/ 下所有层级的子任务报告正文。没有内部子任务也必须写空清单。
+子任务在委派前登记，结束后更新；清单绑定本轮 receipt_token，不能遗漏失败或阻塞的子任务。
+提交回执前原子保存全部报告与清单。你在独立验收时也要读取清单及每份子任务报告，核对有无缺失；
+不能只读摘要或路径。普通检查日志可引用，但子任务报告正文必须保存，供 SDK 原文合并。
+SDK 的 report 字段承载完整合并正文；你仍按既有协议写 verdict，最后回复简短总结即可。
+""" if include_report else ""
     return f"""你是本次编码任务的唯一管理者、任务拆解者和独立验收者。
 
 本次运行身份记录在 `{state.request_file}`，用户的唯一输入 prompt 位于
@@ -187,6 +197,7 @@ Codex，必须服从该选择；若未明确指定，则根据任务特征和当
 任务文件必须要求 worker 把完整回答、关键结论、修改记录、检查结果和阻塞信息写入本轮
 result.md；重要内容及时落盘，长检查输出另存本轮目录的文件并在 result.md 中给出路径。
 worker 必须在最终结果文件原子落盘后才写 receipt，不能把关键内容只留在终端。
+{report_instruction}
 
 run/send 只登记本轮任务并立即返回，不能把命令返回视为 worker 完成。随后持续调用 watch，
 每次最多等待 300 秒，且不得超过本轮剩余执行时间（工具超时应覆盖实际等待及命令开销）。不要把命令转入长期后台 job_output

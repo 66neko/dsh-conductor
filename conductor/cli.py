@@ -138,6 +138,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                     timeout_seconds=args.timeout_seconds, cleanup_timeout_seconds=args.cleanup_timeout_seconds,
                     keep_session=args.keep_session, heartbeat_seconds=args.heartbeat_seconds,
                     worker_log=args.worker_log, worker_log_interval_seconds=args.worker_log_interval_seconds,
+                    include_report=args.include_report,
                 )
             except ValueError as exc:
                 raise ConductorError(str(exc), code="invalid_config", phase="validation") from exc
@@ -191,11 +192,13 @@ def cmd_show(args: argparse.Namespace) -> int:
         _json({"schema_version": 1, "status": "error", "error": str(exc)})
         return 1
     output: JsonObject = {"schema_version": 1, "run_directory": str(run_root), "request": request}
-    for name in ("user-prompt.md", "manager-prompt.md", "plan.json", "verdict.json", "runtime.json", "supervision.json", "supervision.jsonl", "worker-screen.log"):
+    for name in ("user-prompt.md", "manager-prompt.md", "plan.json", "verdict.json", "runtime.json", "supervision.json", "supervision.jsonl", "worker-screen.log", "report.md"):
         path = run_root / name
         if not path.exists():
             continue
-        if path.suffix == ".json":
+        if name == "report.md":
+            output["report_file"] = str(path)
+        elif path.suffix == ".json":
             try:
                 output[path.stem] = read_json_object(path)
             except RecordError as exc:
@@ -249,6 +252,7 @@ def build_parser() -> argparse.ArgumentParser:
     run = commands.add_parser("run", help="运行一个包含任务与验收标准的 prompt")
     run.add_argument("--workspace", type=Path, required=True)
     run.add_argument("--prompt", type=_non_empty, required=True)
+    run.add_argument("--include-report", action="store_true", help="返回全部已登记任务报告正文与验收报告（默认关闭）")
     run.add_argument("--max-attempts", type=_positive, default=2)
     run.add_argument("--worker-idle-timeout-seconds", type=_positive, default=300)
     run.add_argument("--sdk-heartbeat-counts-as-activity", action=argparse.BooleanOptionalAction, default=True,

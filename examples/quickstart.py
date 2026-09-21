@@ -164,6 +164,7 @@ def main() -> int:
     parser.add_argument("--agent", choices=("claude", "codex"), default="claude", help="选择预设 prompt 中的 worker（默认 claude）")
     parser.add_argument("--tmux-only", action="store_true", help="仅自检 tmux，不调用 DSH 或模型")
     parser.add_argument("--stress-report", action="store_true", help="额外生成并验收 6000 行报告（增加模型上下文开销）")
+    parser.add_argument("--include-report", action="store_true", help="输出所有任务报告正文与任务验收报告")
     parser.add_argument("--worker-idle-timeout-seconds", type=int, default=300, help="活动静默阈值，默认 300 秒")
     parser.add_argument("--sdk-heartbeat-counts-as-activity", action=argparse.BooleanOptionalAction, default=True,
                         help="默认 SDK 心跳也算活动；用 --no-sdk-heartbeat-counts-as-activity 排除")
@@ -198,7 +199,8 @@ def main() -> int:
         result = Conductor(
             workspace,
             ConductorConfig(keep_session=True, worker_idle_timeout_seconds=args.worker_idle_timeout_seconds,
-                            sdk_heartbeat_counts_as_activity=args.sdk_heartbeat_counts_as_activity),
+                            sdk_heartbeat_counts_as_activity=args.sdk_heartbeat_counts_as_activity,
+                            include_report=args.include_report),
         ).run(
             task_prompt(args.agent, stress_report=args.stress_report),
             on_event=lambda event: print(event.format(), file=sys.stderr, flush=True),
@@ -206,6 +208,8 @@ def main() -> int:
         result_json = workspace / "quickstart-result.json"
         result_json.write_text(json.dumps(result.to_json(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         print(f"SDK 结果：{result_json}\n完整报告：{result.worker_result}\nworker 屏幕日志：{result.worker_log}", flush=True)
+        if result.report is not None:
+            print(f"合并报告：{result.report_file}\n\n{result.report}", flush=True)
         print(f"监督状态与恢复记录：{result.state_directory / 'supervision.json'}\n{result.state_directory / 'supervision.jsonl'}", flush=True)
         if result.accepted:
             print(f"观察会话：{result.attach_command}\n检查后关闭：conductor cleanup --state-directory {result.state_directory}", flush=True)
@@ -215,6 +219,8 @@ def main() -> int:
     except ConductorError as exc:
         (workspace / "quickstart-error.json").write_text(json.dumps(exc.to_json(), ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"DSH 运行失败：{exc}\n运行记录：{exc.state_directory}", file=sys.stderr)
+        if exc.report is not None:
+            print(exc.report, file=sys.stderr)
     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
         print(f"验证失败：{exc}", file=sys.stderr)
     print(f"保留现场：{workspace}", file=sys.stderr)

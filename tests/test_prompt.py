@@ -40,6 +40,12 @@ class PromptTests(unittest.TestCase):
             self.assertIn(str(state.plan_file), prompt)
             self.assertIn("验收项 ID 必须唯一", prompt)
             self.assertIn("不能在中途切换 agent", prompt)
+            self.assertNotIn("include_report=true", prompt)
+            full = build_prompt(state, skill_scripts={kind: Path("/skill/controller.py") for kind in AgentKind},
+                                available_agents=set(AgentKind), max_attempts=2, worker_idle_timeout_seconds=60,
+                                keep_session=False, include_report=True)
+            self.assertIn("subtask-reports.json", full)
+            self.assertIn("没有内部子任务也必须写空清单", full)
 
 
 if __name__ == "__main__":

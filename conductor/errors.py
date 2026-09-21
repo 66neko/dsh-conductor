@@ -39,6 +39,9 @@ class ConductorError(OperationError):
         self.state_directory = state_directory
         self.cleanup = cleanup
         self.result = result
+        self.report: str | None = None
+        self.report_file: Path | None = None
+        self.report_warnings: tuple[str, ...] = ()
 
     def to_json(self) -> dict[str, Any]:
         value: dict[str, Any] = {
@@ -54,4 +57,10 @@ class ConductorError(OperationError):
             value["cleanup"] = self.cleanup.to_json()
         if self.result is not None:
             value["result"] = self.result.to_json()
+        if self.report is not None:
+            value["report"] = self.report
+            if self.report_file is not None:
+                value["report_file"] = str(self.report_file)
+            if self.report_warnings:
+                value["report_warnings"] = list(self.report_warnings)
         return value

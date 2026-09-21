@@ -93,6 +93,19 @@ Codex”；没有明确指定时，DSH 根据任务与当前环境选择。调�
 
 被 DSH 拒绝是正常业务结果，`result.accepted` 为 `False`；DSH 启动失败、协议失败或结果文件不合法时抛出 `ConductorError`。
 
+从 0.5.2 起，可开启完整报告模式，直接返回“全部任务报告正文 + 任务验收报告”：
+
+```python
+result = Conductor(workspace, ConductorConfig(include_report=True)).run(prompt)
+print(result.report)          # 各轮报告、已登记内部子任务完整正文、逐项验收结果
+print(result.report_file)     # 本轮运行目录中的 report.md
+payload = result.to_json()   # payload["report"] 同样包含完整正文
+```
+
+CLI 加 `--include-report`；示例可以运行 `python3.13 examples/quickstart.py --agent codex --include-report`。
+该功能默认关闭，旧调用和 JSON 字段语义保持不变。开启后若出现缺失、未完成或无法读取的报告，
+通过 `report_warnings` 明示；业务是否通过仍看 `status`/`verdict`。详见[完整报告使用指南](docs/full-report.md)。
+
 ### 3. 处理结果并读取 JSON
 
 业务代码通常先检查 `result.accepted`，再读取结构化计划和验收结论：

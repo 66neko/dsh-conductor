@@ -89,6 +89,14 @@ for line in sys.stdin:
                     "summary": "fixture worker finished",
                 }
                 Path(attempt["receipt_file"]).write_text(json.dumps(receipt), encoding="utf-8")
+                if request_data.get("include_report"):
+                    Path(attempt["result_file"]).with_name("subtask-reports.json").write_text(json.dumps({
+                        "schema_version": 1, "receipt_token": attempt["token"], "subtasks": [],
+                    }), encoding="utf-8")
+                    (request_path.parent / "supervision.json").write_text(json.dumps({
+                        "schema_version": 1, "run_id": request_data["run_id"], "agent": selected["agent"],
+                        "session": selected["session"], "attempt": 1,
+                    }), encoding="utf-8")
                 plan = {
                     "schema_version": 1,
                     "run_id": request_data["run_id"],

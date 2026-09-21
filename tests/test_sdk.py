@@ -4,12 +4,63 @@ import tempfile
 import unittest
 from unittest import mock
 from pathlib import Path
+import json
 
 from conductor.progress import RunEvent
 from conductor.sdk import Conductor, ConductorConfig, ConductorError
 
 
 class SdkTests(unittest.TestCase):
+    def test_report_opt_in_is_a_stable_inline_snapshot_for_both_agents(self) -> None:
+        fixture = Path(__file__).parent / "fixtures" / "fake_dsh.py"
+        for agent in ("claude", "codex"):
+            with self.subTest(agent=agent), tempfile.TemporaryDirectory() as directory:
+                config = ConductorConfig(dsh_bin=str(fixture), worker_log=False, include_report=True,
+                                         timeout_seconds=10, dsh_extra_env={"FAKE_DSH_SDK": "1", "FAKE_DSH_AGENT": agent})
+                with mock.patch("conductor.skills.shutil.which", return_value="/bin/true"):
+                    result = Conductor(directory, config).run("完整任务报告")
+                payload = result.to_json()
+                self.assertIn("完整检查结果", payload["report"])
+                self.assertIn("## 二、任务验收报告", payload["report"])
+                self.assertEqual(payload["dsh"]["final_text"], "fixture complete")
+                self.assertEqual(payload["worker_result"], str(result.worker_result))
+                self.assertEqual(Path(payload["report_file"]).read_text(encoding="utf-8"), result.report)
+                self.assertNotIn("report_warnings", payload)
+                self.assertTrue(json.loads((result.state_directory / "request.json").read_text())["include_report"])
+                result.worker_result.write_text("后续文件变化不影响已返回的正文")
+                result.report_file.unlink()
+                self.assertEqual(result.to_json(), payload)
+
+    def test_report_missing_worker_does_not_turn_rejection_into_execution_error(self) -> None:
+        fixture = Path(__file__).parent / "fixtures" / "fake_dsh.py"
+        with tempfile.TemporaryDirectory() as directory:
+            config = ConductorConfig(dsh_bin=str(fixture), worker_log=False, include_report=True,
+                                     timeout_seconds=10, dsh_extra_env={"FAKE_DSH_SDK": "1", "FAKE_DSH_REJECTED": "1"})
+            with mock.patch("conductor.skills.shutil.which", return_value="/bin/true"):
+                result = Conductor(directory, config).run("拒绝任务")
+            self.assertFalse(result.accepted)
+            self.assertIn("未通过（rejected）", result.report)
+            self.assertTrue(result.report_warnings)
+
+    def test_report_timeout_preserves_error_and_never_accepts_unvalidated_verdict(self) -> None:
+        fixture = Path(__file__).parent / "fixtures" / "fake_dsh.py"
+        with tempfile.TemporaryDirectory() as directory:
+            config = ConductorConfig(dsh_bin=str(fixture), worker_log=False, include_report=True,
+                                     timeout_seconds=2, dsh_extra_env={"FAKE_DSH_SDK": "1", "FAKE_DSH_NO_TURN": "1"})
+            with mock.patch("conductor.skills.shutil.which", return_value="/bin/true"):
+                with self.assertRaises(ConductorError) as caught:
+                    Conductor(directory, config).run("超时任务")
+            error = caught.exception
+            self.assertEqual(error.code, "timeout")
+            self.assertIsNone(error.result)
+            self.assertIn("未形成可返回的有效验收结论", error.report)
+            self.assertNotIn("最终结论：通过", error.report)
+            self.assertEqual(error.to_json()["status"], "error")
+
+    def test_include_report_requires_boolean(self) -> None:
+        with self.assertRaisesRegex(ValueError, "include_report"):
+            ConductorConfig(include_report="true")
+
     def test_rejected_without_receipt_stops_worker_even_with_keep_session_and_no_logs(self) -> None:
         fixture = Path(__file__).parent / "fixtures" / "fake_dsh.py"
         from conductor.tmux import TmuxSession
@@ -92,6 +143,9 @@ class SdkTests(unittest.TestCase):
             assert result.worker_result is not None
             self.assertIn("完整检查结果", result.worker_result.read_text(encoding="utf-8"))
             self.assertEqual(result.to_json()["worker_result"], str(result.worker_result))
+            self.assertIsNone(result.report)
+            self.assertTrue({"report", "report_file", "report_warnings"}.isdisjoint(result.to_json()))
+            self.assertNotIn("include_report", json.loads((result.state_directory / "request.json").read_text()))
             self.assertEqual(result.plan.agent.value, "claude")
             self.assertEqual(result.verdict.status, "accepted")
             self.assertTrue(any(event.kind == "turn_end" for event in events))

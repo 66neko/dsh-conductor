@@ -15,6 +15,7 @@ from .runtime import CleanupReport, RunResources, cleanup_resources
 from .dsh import DshClient, DshConfig, RunResult
 from .models import ExecutionPlan, JsonObject, RecordError, Verdict
 from .progress import EventCallback, ProgressReporter
+from .reports import build_report
 from .prompt import build_prompt
 from .skills import (
     available_workspace_agent_skills,
@@ -48,6 +49,7 @@ class ConductorConfig:
     dsh_init_timeout_seconds: float = 30.0
     dsh_shutdown_timeout_seconds: float = 5.0
     dsh_extra_env: dict[str, str] = field(default_factory=dict)
+    include_report: bool = False
 
     def __post_init__(self) -> None:
         numeric = {
@@ -71,7 +73,7 @@ class ConductorConfig:
             raise ValueError("max_recovery_attempts must be an integer from 1 to 5")
         for name, value in numeric.items():
             positive_seconds(value, name)
-        for name in ("keep_session", "worker_log"):
+        for name in ("keep_session", "worker_log", "include_report"):
             if not isinstance(getattr(self, name), bool):
                 raise ValueError(f"{name} must be a boolean")
         for name in ("provider", "model"):
@@ -132,6 +134,9 @@ class TaskResult:
     worker_result: Path | None = None
     cleanup: CleanupReport = field(default_factory=CleanupReport)
     tmux_socket: Path | None = None
+    report: str | None = None
+    report_file: Path | None = None
+    report_warnings: tuple[str, ...] = ()
 
     @property
     def attach_command(self) -> str:
@@ -162,6 +167,12 @@ class TaskResult:
             value["worker_log"] = str(self.worker_log)
         if self.worker_result is not None:
             value["worker_result"] = str(self.worker_result)
+        if self.report is not None:
+            value["report"] = self.report
+            if self.report_file is not None:
+                value["report_file"] = str(self.report_file)
+            if self.report_warnings:
+                value["report_warnings"] = list(self.report_warnings)
         return value
 
 
@@ -221,6 +232,7 @@ class Conductor:
                 max_recovery_attempts=config.max_recovery_attempts,
                 sdk_heartbeat_counts_as_activity=config.sdk_heartbeat_counts_as_activity,
                 keep_session=config.keep_session, budget=budget, on_create=created,
+                include_report=config.include_report,
             )
             budget = context.budget()
             resources = RunResources(state, context)
@@ -228,7 +240,8 @@ class Conductor:
                                           max_attempts=config.max_attempts,
                                           worker_idle_timeout_seconds=config.worker_idle_timeout_seconds,
                                           keep_session=config.keep_session,
-                                          sdk_heartbeat_counts_as_activity=config.sdk_heartbeat_counts_as_activity)
+                                          sdk_heartbeat_counts_as_activity=config.sdk_heartbeat_counts_as_activity,
+                                          include_report=config.include_report)
             state.write_manager_prompt(manager_prompt)
             budget.check()
             reporter = ProgressReporter(on_event=on_event, heartbeat_seconds=config.heartbeat_seconds,
@@ -274,6 +287,9 @@ class Conductor:
                                 session=selected.session, plan=plan, verdict=verdict, dsh=DshRunSummary.from_run(run),
                                 worker_result=worker_result if worker_result and worker_result.is_file() else None,
                                 tmux_socket=resources.socket)
+            if config.include_report:
+                report = build_report(state, plan=plan, verdict=verdict, budget=budget)
+                result = replace(result, report=report.text, report_file=report.path, report_warnings=report.warnings)
         except BaseException as exc:
             context.first_error = exc
         finally:
@@ -381,6 +397,17 @@ class Conductor:
             failure.state_directory = context.state_directory
             failure.cleanup = cleanup
             failure.result = result
+            if config.include_report and state is not None:
+                if result is not None and result.report is not None:
+                    failure.report, failure.report_file = result.report, result.report_file
+                    failure.report_warnings = result.report_warnings
+                else:
+                    # 核心清理已完成；仅使用剩余清理预算，绝不覆盖首次执行错误。
+                    report = build_report(state, plan=result.plan if result else None,
+                                          verdict=result.verdict if result else None,
+                                          budget=cleanup_budget, failure=str(failure), partial=True)
+                    failure.report, failure.report_file = report.text, report.path
+                    failure.report_warnings = report.warnings
             if failure is error:
                 raise failure
             raise failure from error

@@ -1,6 +1,8 @@
 name: Publish to PyPI
 
 on:
+  push:
+    tags: ["v*"]
   release:
     types: [published]
   workflow_dispatch:
@@ -32,7 +34,7 @@ jobs:
           python-version: "3.13"
       - name: 校验版本标签与项目版本
         env:
-          RELEASE_TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.git_ref }}
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.git_ref || github.ref_name }}
         run: |
           PROJECT_VERSION=$(python -c 'from conductor._version import __version__; print(__version__)')
           test "$RELEASE_TAG" = "v$PROJECT_VERSION" || {
@@ -69,6 +71,10 @@ jobs:
           from conductor.models import AgentKind
           from conductor.skills import prepare_workspace_skills, source_skill
           from conductor.supervision import Supervisor
+          from conductor.reports import build_report
+          from conductor import ConductorConfig
+
+          assert ConductorConfig(include_report=True).include_report
 
           with TemporaryDirectory() as directory:
               root = prepare_workspace_skills(Path(directory))
@@ -105,3 +111,34 @@ jobs:
         with:
           packages-dir: dist/
           attestations: true
+
+  release:
+    name: 创建 GitHub Release
+    if: github.event_name == 'push'
+    needs: [build, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: 从 CHANGELOG 提取本版本详细说明
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          version = os.environ["RELEASE_TAG"].removeprefix("v")
+          changelog = Path("CHANGELOG.md").read_text(encoding="utf-8")
+          match = re.search(r"^## " + re.escape(version) + r"[^\n]*\n(.*?)(?=^## |\Z)", changelog, re.M | re.S)
+          if match is None or not match.group(1).strip():
+              raise SystemExit("Missing release notes for " + version)
+          (Path(os.environ["RUNNER_TEMP"]) / "release-notes.md").write_text(match.group(1).strip() + "\n", encoding="utf-8")
+          PY
+      - name: 发布详细 Release log
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: gh release create "$RELEASE_TAG" --verify-tag --title "dsh-conductor $RELEASE_TAG" --notes-file "$RUNNER_TEMP/release-notes.md"

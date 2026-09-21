@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Pattern, Sequence
 
 from ..errors import OperationError
+from ..reports import subtask_report_contract
 from ..runtime import controller_settings
 from ..models import RecordError, WorkerReceipt, read_json_object, read_worker_result, worker_result_path
 from ..state import atomic_write_json
@@ -80,7 +81,8 @@ def _emit(value: object) -> None:
     sys.stdout.flush()
 
 
-def _submission_prompt(*, task_file: Path, script: Path, receipt: Path, token: str) -> str:
+def _submission_prompt(*, task_file: Path, script: Path, receipt: Path, token: str,
+                       include_report: bool = False) -> str:
     # TUI 只接收短指令；任务正文留在文件中，避免长粘贴在交互式编辑器中被截断。
     command = (
         f"python3.13 {shlex.quote(str(script))} complete "
@@ -89,6 +91,7 @@ def _submission_prompt(*, task_file: Path, script: Path, receipt: Path, token: s
     )
     blocked = command.replace("ready_for_verification", "blocked")
     result_file = worker_result_path(receipt)
+    report_instruction = subtask_report_contract(receipt, token) if include_report else ""
     return f"""
 <dsh_conductor_handoff>
 请完整读取任务文件 `{task_file}`，自主完成其中的任务和自检。该文件不是验收结论。
@@ -96,6 +99,7 @@ def _submission_prompt(*, task_file: Path, script: Path, receipt: Path, token: s
 `{result_file}`。重要内容随工作及时保存；长输出保存在本轮目录的独立文件中，并在结果文件
 中记录路径，不能只留在终端。提交回执前，先写临时文件再原子替换 result.md，确保最终结果完整。
 终端只显示简短进度和文件路径。若任务阻塞，也必须先把原因和已完成工作写入结果文件。
+{report_instruction}
 全部编辑与检查结束后，最后一个工具操作必须运行下列命令，并把 summary 占位文字改为简短事实总结：
 
 {command}
@@ -190,7 +194,8 @@ def main(adapter: AgentAdapter, argv: Sequence[str] | None = None) -> int:
                 value = supervisor.start(
                     task_file=args.task_file, receipt_file=args.receipt, token=args.token,
                     submission=_submission_prompt(task_file=args.task_file.resolve(), script=script,
-                                                  receipt=args.receipt.resolve(), token=args.token),
+                                                  receipt=args.receipt.resolve(), token=args.token,
+                                                  include_report=supervisor.request.get("include_report") is True),
                     command=adapter.resolve_command(args.binary) if args.command == "run" else None,
                 )
             elif args.command == "watch":

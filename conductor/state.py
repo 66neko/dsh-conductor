@@ -95,6 +95,7 @@ class RunState:
         sdk_heartbeat_counts_as_activity: bool = True,
         budget: Budget | None = None,
         on_create: Callable[[str, Path], None] | None = None,
+        include_report: bool = False,
     ) -> "RunState":
         if not prompt.strip():
             raise ValueError("prompt must not be empty")
@@ -159,6 +160,8 @@ class RunState:
             "available_agents": [kind.value for kind in AgentKind if kind in available_agents],
             "agents": [item.to_json() for item in agent_states],
         }
+        if include_report:
+            request["include_report"] = True
         atomic_write_json(request_file, request)
         state = cls(
             run_id=run_id,

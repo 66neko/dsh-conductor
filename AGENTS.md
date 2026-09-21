@@ -15,6 +15,7 @@
 | `conductor/dsh.py` | `dsh --profile sdk` JSON-RPC/stdio 客户端 |
 | `conductor/state.py` | 运行目录、候选 agent 会话、attempt 和 receipt 路径 |
 | `conductor/models.py` | plan、receipt、verdict 的 schema 与事实校验 |
+| `conductor/reports.py` | 可选完整报告快照、内部子任务清单与验收报告合并 |
 | `conductor/prompt.py` | 发给 DSH 的中文拆解、委派、监督和验收契约 |
 | `conductor/progress.py` | `RunEvent`、DSH 协议进度、心跳和 worker 日志事件 |
 | `conductor/worker_log.py` | 轮询精确 tmux 会话并持久化屏幕变化 |
@@ -43,6 +44,7 @@
 14. `timeout_seconds` 覆盖整个 run，清理预留 `min(cleanup_timeout_seconds, timeout_seconds * 0.1)`；阶段等待不得增加总预算。清理忽略调用方取消事件，保留首次执行错误。
 15. 每个 SDK run 使用私有 tmux socket 和资源启动身份，不能对默认 server 或裸 PID 执行恢复清理。只有 accepted + keep_session 可保留 worker；清理状态必须可核验。
 16. 同一 workspace 拒绝重叠 run。SDK 不改宿主信号处理器；CLI 在主线程临时处理 SIGINT/SIGTERM，清理后输出一个 JSON 并恢复处理器。
+17. include_report 默认关闭；开启时 report 合并实际各轮和已登记子任务报告正文及可信 verdict，不改写 worker_result、dsh.final_text 或验收语义。缺失正文必须明示，报告组装共用剩余预算，不能覆盖首次执行错误。
 
 ## 常用命令
 

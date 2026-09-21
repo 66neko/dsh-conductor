@@ -62,6 +62,12 @@ class AgentControllerTests(unittest.TestCase):
         self.assertIn("/tmp/task.md", prompt)
         self.assertIn("/tmp/result.md", prompt)
         self.assertIn(" complete ", prompt)
+        self.assertNotIn("subtask-reports.json", prompt)
+        full = _submission_prompt(task_file=Path("/tmp/task.md"), script=Path("/skill/controller.py"),
+                                  receipt=Path("/tmp/receipt.json"), token="token-a", include_report=True)
+        self.assertIn("subtask-reports.json", full)
+        self.assertIn('"receipt_token":"token-a"', full)
+        self.assertIn("所有后代", full)
 
 
 if __name__ == "__main__":
