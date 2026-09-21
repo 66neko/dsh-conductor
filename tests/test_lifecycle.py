@@ -222,24 +222,34 @@ class LifecycleTests(unittest.TestCase):
                 self.assertLess(time.monotonic() - started, 0.9)
 
     def test_large_prompt_write_can_be_cancelled_or_timed_out(self):
+        from conductor.dsh import DshClient, DshConfig, DshError
+
+        # 直接向已初始化的 DSH 写入大帧：SDK 原始 prompt 会落盘，实际 RPC 只传管理指令。
+        # 计时从待验证的写入阶段开始，避免慢 runner 在准备阶段就取消而根本没有测到管道写入。
+        prompt = "x" * 2_000_000
         for cancelled in (False, True):
             with self.subTest(cancelled=cancelled):
                 cancel = threading.Event()
                 timer = threading.Timer(0.2, cancel.set) if cancelled else None
-                cfg = ConductorConfig(dsh_bin=str(FIXTURE), timeout_seconds=0.7, worker_log=False,
-                                      dsh_extra_env={"FAKE_DSH_FREEZE_STDIN": "1"})
-                if timer:
-                    timer.start()
-                started = time.monotonic()
+                client = DshClient(DshConfig(workspace=self.workspace, dsh_bin=str(FIXTURE),
+                                             extra_env={"FAKE_DSH_FREEZE_STDIN": "1"},
+                                             budget=Budget(float("inf"), cancel_event=cancel)))
                 try:
-                    with self.assertRaises(ConductorError) as caught:
-                        Conductor(self.workspace, cfg).run("x" * 2_000_000, cancel_event=cancel)
+                    client.start()
+                    client.initialize()
+                    if timer:
+                        timer.start()
+                    started = time.monotonic()
+                    with self.assertRaises(DshError) as caught:
+                        client.run(prompt, session_id="large-write", timeout_seconds=0.5)
                     self.assertEqual(caught.exception.code, "cancelled" if cancelled else "timeout")
                     self.assertEqual(caught.exception.details["rpc_method"], "session/prompt")
-                    self.assertLess(time.monotonic() - started, 1)
+                    self.assertLess(time.monotonic() - started, 2)
                 finally:
                     if timer:
                         timer.cancel()
+                        timer.join()
+                    client.close(budget=Budget(time.monotonic() + 2), graceful=False)
 
     def test_invalid_protocol_and_incomplete_completion_cannot_succeed(self):
         for env, code in (({"FAKE_DSH_INVALID_FRAME": "1"}, "dsh_protocol_error"),
