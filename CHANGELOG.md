@@ -1,5 +1,48 @@
 # 变更记录
 
+## 0.5.3 — 2026-09-24
+
+本版缩短 quickstart 演示任务，并将完整报告的验收部分精简为统一结论。
+SDK 接口、JSON 字段、schema 版本及独立验收协议均保持不变。
+
+### 改进
+
+- quickstart 改为创建 `hello.py` 并输出 `Hello, DSH!`，由 DSH 和调用方独立执行确认。
+  worker 只需提供简短完整的交接报告，移除订单 CSV、金额处理、多场景单测和额外长报告生成。
+- 示例默认开启 `include_report`，直接展示 SDK 返回的报告快照；支持 `--no-include-report`
+  关闭，并保留 `--include-report`。SDK 的 `ConductorConfig.include_report` 默认仍为 `False`。
+- quickstart 继续保存完整结果 JSON，支持缺少 `report_file` 的内联报告，并展示报告收集或
+  落盘警告；错误结果也保留已有报告。报告展示不依赖固定 Markdown 标题。
+- 保留 `--tmux-only` 的 6000 行采集自检，默认业务演示不再额外运行该自检；删除示例的
+  `--stress-report` 参数。长报告完整性继续由自动化测试覆盖。
+- 合并报告保留全部实际 worker 轮次和已登记 Claude Code/Codex 子任务的原文，简化包装信息。
+  最后只展示最终状态、简短总结及非空剩余问题，不再逐项展开检查方法、证据和通过情况，
+  也不重复列出产物。历史轮次、正文缺失、收集问题和运行错误仍明确标示。
+- `verdict.checks`、`verdict.artifacts` 等结构化数据完整保留；DSH 仍须独立验证所有验收项。
+  `worker_result`、`dsh.final_text`、事件回调、CLI 单 JSON 输出及退出码保持原有语义。
+
+### 使用
+
+```bash
+python3.13 -m pip install --upgrade dsh-conductor==0.5.3
+
+# 在源码仓库运行：默认打印 worker 报告和统一验收结论
+python3.13 examples/quickstart.py
+python3.13 examples/quickstart.py --agent codex
+python3.13 examples/quickstart.py --no-include-report
+python3.13 examples/quickstart.py --tmux-only
+```
+
+已有 SDK 调用无需迁移。`report` 仍是 Markdown 字符串，`report_file` 和 `report_warnings`
+的类型与可选规则不变；需要逐项审计详情时继续读取 `result.verdict.checks` 或 JSON `verdict`。
+
+### 验证
+
+- 135 项自动化测试全部通过，包含协议模拟、真实 tmux、报告完整性和 SDK/CLI 兼容检查。
+- 编译检查、独立 tmux 自检、wheel/sdist 构建、元数据及 wheel 内容检查通过；隔离安装后的
+  SDK 和内置 skill 验证通过，两种 agent 均完成协议模拟验证。
+- 本次本地环境未提供 `dsh` 命令，未进行真实模型端到端运行，也未测量模型执行耗时。
+
 ## 0.5.2 — 2026-09-21
 
 本版新增可选完整报告返回：将**所有实际 worker 轮次的报告、已登记 Claude/Codex 内部子任务的

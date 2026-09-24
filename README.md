@@ -93,17 +93,19 @@ Codex”；没有明确指定时，DSH 根据任务与当前环境选择。调�
 
 被 DSH 拒绝是正常业务结果，`result.accepted` 为 `False`；DSH 启动失败、协议失败或结果文件不合法时抛出 `ConductorError`。
 
-从 0.5.2 起，可开启完整报告模式，直接返回“全部任务报告正文 + 任务验收报告”：
+0.5.2 新增了可选的完整报告模式。0.5.3 保留全部任务报告正文，将报告末尾的验收展示精简为
+统一结论；详细验收记录继续保留在结构化 `verdict` 中：
 
 ```python
 result = Conductor(workspace, ConductorConfig(include_report=True)).run(prompt)
-print(result.report)          # 各轮报告、已登记内部子任务完整正文、逐项验收结果
-print(result.report_file)     # 本轮运行目录中的 report.md
+print(result.report)          # 各轮和已登记子任务的完整正文，以及统一验收结论
+print(result.report_file)     # 本轮 report.md；未落盘时为 None
 payload = result.to_json()   # payload["report"] 同样包含完整正文
 ```
 
-CLI 加 `--include-report`；示例可以运行 `python3.13 examples/quickstart.py --agent codex --include-report`。
-该功能默认关闭，旧调用和 JSON 字段语义保持不变。开启后若出现缺失、未完成或无法读取的报告，
+SDK 和 CLI 默认关闭完整报告，CLI 加 `--include-report` 开启。quickstart 示例默认开启，
+可运行 `python3.13 examples/quickstart.py --agent codex`。报告末尾只展示最终状态、总结与必要的
+剩余问题；详细检查和产物仍保留在 `verdict` 中。开启后若出现缺失、未完成或无法读取的报告，
 通过 `report_warnings` 明示；业务是否通过仍看 `status`/`verdict`。详见[完整报告使用指南](docs/full-report.md)。
 
 ### 3. 处理结果并读取 JSON
@@ -189,10 +191,9 @@ raise SystemExit(0 if result.accepted else 1)
 更完整的字段说明、错误 JSON 和实时事件格式见 [`docs/result-json.md`](docs/result-json.md)。
 可运行示例见 [`examples/quickstart.py`](examples/quickstart.py)。
 
-仓库中的 quickstart 预设了一个较完整的订单 CSV 汇总任务。先自检 tmux 长输出采集，再让
-worker 实现金额汇总、错误处理和单元测试，最后交付记录实现、检查结果及文件路径的 `result.md`。
-默认报告只包含业务内容。调用方会再次检查报告末尾标记、汇总是否为 `66.00`，以及无效输入
-是否保留既有输出。
+仓库中的 quickstart 让 worker 创建 `hello.py`，运行后输出 `Hello, DSH!` 和一个换行，
+并交付简短的 `result.md`。DSH 独立执行脚本验收，调用方再检查退出码、stdout 与 stderr。
+默认流程直接运行这个轻量任务，便于快速验证 SDK、worker 交接和报告返回。
 
 在仓库根目录运行（直接执行脚本会使用当前仓库源码）：
 
@@ -200,25 +201,23 @@ worker 实现金额汇总、错误处理和单元测试，最后交付记录实�
 python3.13 -m conductor doctor
 python3.13 examples/quickstart.py                 # 默认使用 Claude Code
 python3.13 examples/quickstart.py --agent codex   # 使用 Codex 再验证一次
+python3.13 examples/quickstart.py --no-include-report  # 关闭合并报告
 ```
 
-仅验证 tmux 采集、不启动 DSH 或模型时，运行：
+示例默认启用 `include_report`，直接展示各轮 worker 和已登记子任务的报告正文，最后给出统一
+验收结论。`--include-report` 可显式开启，`--no-include-report` 可关闭；SDK 的配置默认值仍为
+`False`。完整返回值保存在 `quickstart-result.json`，有合并报告时一并保存内联正文，并展示
+可用的 `report_file` 路径和收集提示。
+
+tmux 长输出采集自检独立运行，不启动 DSH 或模型：
 
 ```bash
 python3.13 examples/quickstart.py --tmux-only
 ```
 
-仅在需要验证长报告交接时，显式启用 6000 行编号压力测试：
-
-```bash
-python3.13 examples/quickstart.py --stress-report
-```
-
-该选项要求 worker 用 Python 生成编号，并要求 DSH 读取完整报告，会增加模型上下文开销。
-日常验证无需启用；tmux 的 6000 行采集自检由本地 Python 生成和检查，任务明确无需读取其日志。
-
-正常会看到 tmux 当前屏幕 50 行、最近历史连同屏幕 5050 行、扩大读取 6000 行；
-日志保留 5050 行，实时回调只有 12 行。真实 worker 任务成功后显示“全部验证通过”。
+自检由本地 Python 生成和检查 6000 行输出。正常会看到 tmux 当前屏幕 50 行、最近历史连同
+屏幕 5050 行、扩大读取 6000 行；日志保留 5050 行，实时回调只有 12 行。
+真实 worker 任务成功后显示“全部验证通过”。
 每次使用新的 `/tmp/dsh-quickstart-…` 工作区（系统临时目录配置可改变位置），运行结束后保留
 `quickstart-result.json`、`result.md` 和日志；成功时保留 worker 会话并打印 attach/关闭命令，失败时停止 worker。
 `quickstart-result.json` 在 `run()` 返回后才写入；运行中的 request、plan、verdict 和屏幕日志

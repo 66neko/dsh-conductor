@@ -46,6 +46,10 @@ class PromptTests(unittest.TestCase):
                                 keep_session=False, include_report=True)
             self.assertIn("subtask-reports.json", full)
             self.assertIn("没有内部子任务也必须写空清单", full)
+            self.assertIn("不逐项展示检查结果", full)
+            self.assertIn("verdict.checks 完整记录每项检查", full)
+            self.assertIn("verdict.summary 用一两句话", full)
+            self.assertIn("不逐项复述检查方法、证据或产物列表", full)
 
 
 if __name__ == "__main__":

@@ -68,25 +68,58 @@ class ReportTests(unittest.TestCase):
         self.assertIn("后代报告原文", result.text)
         self.assertLess(result.text.index("第 1 轮原始"), result.text.index("第 2 轮原始"))
         self.assertNotIn("诱饵", result.text)
-        self.assertIn("历史轮次", result.text)
-        self.assertIn("python -m unittest", result.text)
-        self.assertIn("独立执行通过", result.text)
-        self.assertIn("output.txt", result.text)
+        self.assertIn("### Codex 第 1 轮报告（历史轮次）", result.text)
+        self.assertIn("### Codex 第 2 轮报告", result.text)
+        self.assertIn("### 子任务 parent — Claude Code：检查实现", result.text)
+        self.assertIn("### 子任务 child — Codex：检查实现", result.text)
+        self.assertNotIn("回执状态：", result.text)
+        self.assertNotIn("父任务：", result.text)
+        self.assertNotIn("自报状态：", result.text)
+        self.assertNotIn("来源：", result.text)
+        self.assertNotIn(self.state.run_id, result.text)
+        self.assertNotIn(self.plan.task_summary, result.text)
+        self.assertNotIn("python -m unittest", result.text)
+        self.assertNotIn("独立执行通过", result.text)
+        self.assertNotIn("output.txt", result.text)
+        self.assertNotIn("### 剩余问题", result.text)
+        self.assertTrue(result.text.endswith("最终结论：通过（accepted）\n\n全部验收通过\n"))
         self.assertEqual(result.path.read_text(encoding="utf-8"), result.text)
         self.assertEqual(json.loads(json.dumps({"report": result.text}))["report"], result.text)
+
+    def test_original_markdown_is_preserved_even_when_it_uses_report_headings(self):
+        worker_body = ("## 一、所有任务结果报告\n\nworker 原始说明\n\n"
+                       "## 二、任务验收报告\n\nworker 自查结果\n\n"
+                       "### 产物\n\n- worker-output.txt\n")
+        subtask_body = "## 二、任务验收报告\n\n子任务原始检查方法：运行测试\n"
+        self.selected.attempts[0].result_file.write_text(worker_body, encoding="utf-8")
+        self.manifest(1, [self.subtask("same-headings", body=subtask_body)])
+        result = self.report()
+        self.assertIn(worker_body, result.text)
+        self.assertIn(subtask_body, result.text)
+        self.assertEqual(result.text.count(worker_body), 1)
+        self.assertEqual(result.text.count(subtask_body), 1)
+        self.assertEqual(result.text.count("最终结论：通过（accepted）"), 1)
+        self.assertTrue(result.text.endswith("最终结论：通过（accepted）\n\n全部验收通过\n"))
 
     def test_rejected_collects_registered_partial_attempt_without_receipt(self):
         atomic_write_json(self.state.root / "supervision.json", {
             "run_id": self.state.run_id, "agent": "codex", "session": self.selected.session, "attempt": 3,
         })
         self.selected.attempts[2].result_file.write_text("中途失败仍然保留的正文", encoding="utf-8")
-        rejected = replace(self.verdict, status="rejected", remaining_issues=("任务阻塞",))
+        rejected = replace(self.verdict, status="rejected", summary="任务未完成", remaining_issues=("任务阻塞",))
         result = self.report(verdict=rejected)
         self.assertIn("中途失败仍然保留的正文", result.text)
         self.assertIn("未通过（rejected）", result.text)
-        self.assertIn("任务阻塞", result.text)
+        self.assertIn("任务未完成", result.text)
+        self.assertIn("### 剩余问题\n\n- 任务阻塞", result.text)
         self.assertTrue(any("未确认有效交接" in item for item in result.warnings))
         self.assertTrue(any("轮次与" in item for item in result.warnings))
+
+    def test_runtime_failure_preserves_a_valid_business_conclusion(self):
+        result = self.report(failure="cleanup failed")
+        self.assertIn("最终结论：通过（accepted）", result.text)
+        self.assertIn("全部验收通过", result.text)
+        self.assertIn("运行错误：cleanup failed", result.text)
 
     def test_zero_attempts_does_not_collect_precreated_files(self):
         verdict = replace(self.verdict, status="rejected", attempts=0, remaining_issues=("agent unavailable",))

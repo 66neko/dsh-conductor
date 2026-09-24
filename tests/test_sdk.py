@@ -21,7 +21,21 @@ class SdkTests(unittest.TestCase):
                     result = Conductor(directory, config).run("完整任务报告")
                 payload = result.to_json()
                 self.assertIn("完整检查结果", payload["report"])
+                agent_name = {"claude": "Claude Code", "codex": "Codex"}[agent]
+                self.assertIn(f"### {agent_name} 第 1 轮报告", payload["report"])
                 self.assertIn("## 二、任务验收报告", payload["report"])
+                self.assertIn("最终结论：通过（accepted）", payload["report"])
+                self.assertIn("fixture accepted", payload["report"])
+                self.assertNotIn("criterion-1", payload["report"])
+                self.assertNotIn("test fixture", payload["report"])
+                self.assertNotIn("fixture.txt exists", payload["report"])
+                self.assertNotIn("### 产物", payload["report"])
+                self.assertEqual(payload["verdict"]["schema_version"], 2)
+                self.assertEqual(payload["verdict"]["checks"], [{
+                    "criterion_id": "criterion-1", "criterion": "fixture.txt exists",
+                    "method": "test fixture", "evidence": "fixture.txt exists", "passed": True,
+                }])
+                self.assertEqual(payload["verdict"]["artifacts"], ["fixture.txt"])
                 self.assertEqual(payload["dsh"]["final_text"], "fixture complete")
                 self.assertEqual(payload["worker_result"], str(result.worker_result))
                 self.assertEqual(Path(payload["report_file"]).read_text(encoding="utf-8"), result.report)

@@ -1,8 +1,8 @@
-# 完整任务报告与验收报告（0.5.2）
+# 完整任务报告与验收结论
 
 完整报告模式把本次运行所有实际轮次的 worker 报告、登记的内部子任务报告正文，以及 DSH
-独立验收结果合并成一份 Markdown。正文直接读取文件，不由模型重新概括，也不从 tmux 历史拼接。
-功能默认关闭；需要完整正文的调用方显式开启。
+统一验收结论合并成一份 Markdown。正文直接读取文件，不由模型重新概括，也不从 tmux 历史拼接。
+SDK 和 CLI 默认关闭；需要完整正文的调用方显式开启。quickstart 示例默认开启。
 
 ## Python SDK
 
@@ -11,7 +11,10 @@ from conductor import Conductor, ConductorConfig, ConductorError
 
 client = Conductor("/path/to/workspace", ConductorConfig(include_report=True))
 try:
-    result = client.run("请使用 Codex 实现订单汇总。验收标准：单元测试通过。")
+    result = client.run(
+        "请使用 Codex 创建 hello.py，运行后输出 Hello, DSH! 加一个换行。"
+        "验收标准：退出码为 0，stdout 内容完全一致，stderr 为空。"
+    )
 except ConductorError as exc:
     # 超时、取消、协议或结果校验失败继续使用既有错误协议。
     print(exc.code, str(exc))
@@ -20,7 +23,8 @@ except ConductorError as exc:
     payload = exc.to_json()
 else:
     print(result.report)
-    print("报告文件：", result.report_file)
+    if result.report_file is not None:
+        print("报告文件：", result.report_file)
     for warning in result.report_warnings:
         print("报告收集提示：", warning)
     payload = result.to_json()
@@ -36,38 +40,47 @@ else:
 ```bash
 python3.13 -m conductor run \
   --workspace /path/to/workspace \
-  --prompt '请使用 Codex 实现订单汇总。验收标准：单元测试通过。' \
+  --prompt '请使用 Codex 创建 hello.py，运行后输出 Hello, DSH! 加一个换行。验收标准：退出码为 0，stdout 内容完全一致，stderr 为空。' \
   --include-report > result.json
 
 python3.13 -c 'import json; print(json.load(open("result.json"))["report"])'
 
-python3.13 examples/quickstart.py --agent codex --include-report
-python3.13 examples/quickstart.py --agent claude --include-report --stress-report
+python3.13 examples/quickstart.py --agent codex
+python3.13 examples/quickstart.py --agent claude --no-include-report
 ```
 
 CLI stdout 仍然只有一个 JSON 对象，进度仍写 stderr；JSON 内的 `report` 是含换行的完整字符串。
-quickstart 会在原有检查之外打印合并报告，并将正文一起保存到 quickstart-result.json。
+quickstart 创建并运行一个输出 `Hello, DSH!` 的 `hello.py`，默认打印合并报告，并将正文一起
+保存到 `quickstart-result.json`。可用 `--include-report` 显式开启、`--no-include-report` 关闭；
+这不改变 SDK 中 `include_report=False` 的默认值。默认任务不运行 tmux 长输出自检，
+需要时单独运行 `python3.13 examples/quickstart.py --tmux-only`。
 `conductor show --workspace ...` 可查看已落盘的 `report_file` 路径。
 
 ## 返回字段与两部分内容
 
 | 新字段 | Python / JSON 类型 | 含义 |
 |---|---|---|
-| report | str / string | 全部已收集正文与任务验收报告组成的 Markdown |
+| report | str / string | 全部已收集正文与统一验收结论组成的 Markdown |
 | report_file | Path 或 None / string（缺失时省略） | 本轮运行目录 report.md；写入失败或没有剩余预算时不提供 |
 | report_warnings | tuple[str, ...] / array[string]（为空时省略） | 缺失、未完成、身份不匹配、读取/持久化失败等提示 |
 
 报告固定有两个主要部分：
 
-1. **所有任务结果报告**：任务概述；按轮次排列的每份 result.md；该轮清单登记的全部子任务正文。
+1. **所有任务结果报告**：按轮次排列的每份 result.md，以及该轮清单登记的全部子任务正文。
    返工前报告标记为历史轮次，最后一轮也不凭 worker 自述宣告通过。保留原始文本的内容与顺序，
    不设行数截断、不把报告正文替换成路径，不展开普通测试日志等任意附件。
-2. **任务验收报告**：从已校验的 verdict 生成最终结论、summary、每项 criterion/method/evidence/passed、
-   artifacts 与 remaining_issues。有运行错误但没有可信 verdict 时明确写“未形成可返回的有效验收结论”。
+2. **任务验收报告**：从已校验的 verdict 生成统一的最终状态和 summary；存在 remaining_issues 时
+   列出剩余问题。报告不再展开每项检查或重复列出产物。有运行错误但没有可信 verdict 时明确写
+   “未形成可返回的有效验收结论”。
+
+详细的 `checks`（criterion、method、evidence、passed）和 `artifacts` 继续保存在结构化
+`verdict` 中。DSH 仍逐项执行独立验收，SDK 仍校验每个验收项、回执和工作区事实；精简的是
+合并报告的展示内容。各轮及子任务正文原样保留，其中 worker 自身写出的检查记录也会保留。
 
 开启后在正常返回的 JSON 中添加上述字段；关闭时三个字段均省略。`worker_result` 继续表示最后一轮
 result.md 的路径，`dsh.final_text` 继续保存 DSH 原始最后回复。run() 签名、回调、退出码和各协议
-schema 版本不变，顶层为 1，plan=1、verdict=2、receipt=1。新增 dataclass 字段位于末尾并提供默认值。
+schema 版本不变，顶层为 1，plan=1、verdict=2、receipt=1。`report`、`report_file` 和
+`report_warnings` 的字段、类型与可选性也保持不变。
 
 ## 内部子任务报告清单
 

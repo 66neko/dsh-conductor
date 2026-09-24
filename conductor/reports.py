@@ -14,6 +14,9 @@ from .models import ExecutionPlan, RecordError, Verdict, WorkerReceipt, _read_te
 from .state import AttemptState, RunState
 
 
+_AGENT_NAMES = {"claude": "Claude Code", "codex": "Codex"}
+
+
 @dataclass(frozen=True, slots=True)
 class ReportSnapshot:
     text: str
@@ -100,8 +103,7 @@ def _subtasks(attempt: AttemptState, budget: Budget, parts: list[str], warnings:
             if path in paths:
                 raise RecordError("多个子任务引用同一报告文件")
             paths.add(path)
-            parts.append(f"\n### 子任务 {task_id} — {agent}：{title}\n\n"
-                         f"父任务：{parent or '本轮 worker'}；自报状态：{status}；来源：{relative}\n\n")
+            parts.append(f"\n### 子任务 {task_id} — {_AGENT_NAMES[agent]}：{title}\n\n")
             if status != "completed":
                 warnings.append(f"{label}（{task_id}）状态为 {status}，可能未完成。")
             parts.append(_body(path, root, budget))
@@ -117,13 +119,9 @@ def _verification(verdict: Verdict | None, failure: str | None) -> str:
         return "\n## 二、任务验收报告\n\n未形成可返回的有效验收结论。\n\n" + (f"运行错误：{failure}\n" if failure else "")
     parts = ["\n## 二、任务验收报告\n\n",
              f"最终结论：{'通过' if verdict.status == 'accepted' else '未通过'}（{verdict.status}）\n\n",
-             f"{verdict.summary}\n\n"]
-    for check in verdict.checks:
-        parts.append(f"### {check.criterion_id}：{check.criterion}\n\n"
-                     f"结果：{'通过' if check.passed else '未通过'}\n\n"
-                     f"检查方法：{check.method}\n\n证据：{check.evidence}\n\n")
-    parts.append("### 产物\n\n" + ("\n".join(f"- {path}" for path in verdict.artifacts) or "无") + "\n\n")
-    parts.append("### 剩余问题\n\n" + ("\n".join(f"- {issue}" for issue in verdict.remaining_issues) or "无") + "\n")
+             f"{verdict.summary}\n"]
+    if verdict.remaining_issues:
+        parts.append("\n### 剩余问题\n\n" + "\n".join(f"- {issue}" for issue in verdict.remaining_issues) + "\n")
     if failure:
         parts.append(f"\n运行错误：{failure}（不改写上述已校验的业务结论）\n")
     return "".join(parts)
@@ -150,12 +148,11 @@ def build_report(state: RunState, *, plan: ExecutionPlan | None, verdict: Verdic
                  budget: Budget, failure: str | None = None, partial: bool = False) -> ReportSnapshot:
     """文件问题以警告展示；正常运行仍传播超时/取消，错误收尾仅尽力收集。"""
     warnings: list[str] = []
-    parts = ["## 一、所有任务结果报告\n\n", f"运行：{state.run_id}\n\n"]
+    parts = ["## 一、所有任务结果报告\n\n"]
     try:
         budget.check()
         if plan is None:
             plan = ExecutionPlan.load(_within(state.plan_file, state.root), expected_run_id=state.run_id, budget=budget)
-        parts.append(f"任务：{plan.task_summary}\n\n")
         selected = state.agent_state(plan.agent)
         count = verdict.attempts if verdict else 0
         supervision_path = state.root / "supervision.json"
@@ -179,14 +176,13 @@ def build_report(state: RunState, *, plan: ExecutionPlan | None, verdict: Verdic
             parts.append("没有已确认执行的 worker 轮次。\n")
         for attempt in selected.attempts[:count]:
             budget.check()
-            historical = "历史轮次，最终结论见第二部分" if attempt.number < count else "最后一轮，验收结论见第二部分"
-            parts.append(f"\n### {plan.agent.value} 第 {attempt.number} 轮报告\n\n{historical}\n\n")
+            historical = "（历史轮次）" if attempt.number < count else ""
+            parts.append(f"\n### {_AGENT_NAMES[plan.agent.value]} 第 {attempt.number} 轮报告{historical}\n\n")
             try:
                 _within(attempt.result_file.parent, state.root)
                 _within(attempt.receipt_file, attempt.result_file.parent)
                 _within(attempt.result_file, attempt.result_file.parent)
-                receipt = WorkerReceipt.load(attempt.receipt_file, expected_token=attempt.token, budget=budget)
-                parts.append(f"回执状态：{receipt.status}（交接信号，不代表验收通过）\n\n")
+                WorkerReceipt.load(attempt.receipt_file, expected_token=attempt.token, budget=budget)
             except (OSError, ValueError, RecordError) as exc:
                 warnings.append(f"第 {attempt.number} 轮未确认有效交接，报告可能不完整：{exc}")
             try:

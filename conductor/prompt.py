@@ -155,13 +155,15 @@ def build_prompt(
         else "verdict 原子落盘后不要关闭 tmux 会话；SDK 会在结束补采和结果校验后关闭所选会话。"
     )
     report_instruction = """
-本次 include_report=true：SDK 将按执行轮次合并完整任务报告、内部子任务报告和验收报告。
+本次 include_report=true：SDK 将按执行轮次合并完整任务报告、内部子任务报告，并附上统一验收结论。
 每轮 task 文件必须要求 worker 在 result.md 保存完整回答，并按控制器交接指令维护
 subtask-reports.json 和 subtasks/ 下所有层级的子任务报告正文。没有内部子任务也必须写空清单。
 子任务在委派前登记，结束后更新；清单绑定本轮 receipt_token，不能遗漏失败或阻塞的子任务。
 提交回执前原子保存全部报告与清单。你在独立验收时也要读取清单及每份子任务报告，核对有无缺失；
 不能只读摘要或路径。普通检查日志可引用，但子任务报告正文必须保存，供 SDK 原文合并。
-SDK 的 report 字段承载完整合并正文；你仍按既有协议写 verdict，最后回复简短总结即可。
+SDK 的 report 字段保留报告原文，只总结最终验收结论，不逐项展示检查结果。
+你仍须按既有协议独立验收，在 verdict.checks 完整记录每项检查；verdict.summary 用一两句话
+概括最终结论，不逐项复述检查方法、证据或产物列表。最后回复简短总结即可。
 """ if include_report else ""
     return f"""你是本次编码任务的唯一管理者、任务拆解者和独立验收者。
 

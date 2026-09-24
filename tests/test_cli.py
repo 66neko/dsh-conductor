@@ -25,6 +25,9 @@ class CliTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertIn("完整检查结果", payload["report"])
             self.assertIn("## 二、任务验收报告", payload["report"])
+            self.assertIn("最终结论：通过（accepted）", payload["report"])
+            self.assertNotIn("test fixture", payload["report"])
+            self.assertEqual(payload["verdict"]["checks"][0]["method"], "test fixture")
             self.assertEqual(payload["schema_version"], 1)
 
     def test_install_skills_targets_workspace(self) -> None:
