@@ -1,5 +1,46 @@
 # 变更记录
 
+## 0.5.4 — 2026-10-08
+
+本版修复 DSH 在最后一轮 worker 回执为 blocked 或少报 `attempts` 时仍写 accepted，导致运行以
+`accepted verdict requires a ready_for_verification final receipt` 失败的问题。SDK 接口、JSON
+字段、schema 版本及验收规则保持不变。
+
+### 修复
+
+- 管理者契约明确：blocked 回执表示 worker 声明本轮未完成，不能作为 accepted 的最终交接。阻塞
+  可以处理且还有轮次时继续返工，要求 worker 提交 ready_for_verification 回执；否则先 stop 再写
+  rejected。
+- 明确 `attempts` 是最后一次 run/send 的轮次编号，recover 不增加轮数；accepted 时第 1 至第
+  `attempts` 轮都必须有有效回执，且最后一轮为 ready_for_verification。
+
+### 新增
+
+- CLI 新增 `validate-verdict --request <request.json> [--verdict <file>]`，复用 SDK 最终校验
+  （plan、回执、verdict 及 agent 可用性）；stdout 输出一个 JSON，valid 退出 0，invalid 退出 1。
+- DSH 写完 `verdict.json.tmp` 后必须先运行该命令，通过后才 rename。校验失败时可在同一管理回合内
+  修正 verdict 或继续返工，不再等回合结束后由 SDK 直接判定运行失败。命令使用 `python3.13 -P`，
+  避免工作区内同名 `conductor` 目录遮蔽 SDK。
+
+### 使用
+
+```bash
+python3.13 -m pip install --upgrade dsh-conductor==0.5.4
+
+# 人工排查已结束运行的 verdict
+python3.13 -m conductor validate-verdict --request /absolute/path/to/run/request.json
+```
+
+已有 SDK 调用无需迁移。DSH 回合结束后，SDK 仍独立执行同一套最终校验。
+
+### 验证
+
+- 135 项自动化测试全部通过；编译检查、wheel/sdist 构建、元数据及 wheel 内容检查通过。
+- 使用模拟运行目录验证 `validate-verdict`：第 1 轮 blocked、第 2 轮 ready 时，`attempts=1` 的
+  accepted 被拒绝且错误与 SDK 一致，`attempts=2` 通过；rejected、缺失文件和不可用 agent 的
+  结果符合预期，`-P` 可避免工作区同名包遮蔽。
+- 本地环境未提供 `dsh` 命令，未进行真实模型端到端运行。
+
 ## 0.5.3 — 2026-09-24
 
 本版缩短 quickstart 演示任务，并将完整报告的验收部分精简为统一结论。

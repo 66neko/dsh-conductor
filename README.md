@@ -250,7 +250,7 @@ python3.13 -m conductor run \
   --prompt '请使用 Claude Code 创建 hello.txt。验收标准：文件存在且内容为 Hello。'
 ```
 
-`run` 的 stdout 始终只有一个 JSON 对象；实时事件由 CLI 写入 stderr，因此可以安全地重定向 stdout。每次运行启动 DSH 前，SDK 都会把包内两个 skill 直接覆盖到 `<workspace>/.dsh/skills/`，供 DSH 项目级发现；不会写入 `~/.dsh/skills`，任务结束后也不会删除。`install-skills --workspace` 可提前执行同样的复制操作。`show` 可读取最近一次运行的 request、用户 prompt、manager prompt、plan、verdict 和日志路径。
+`run` 的 stdout 始终只有一个 JSON 对象；实时事件由 CLI 写入 stderr，因此可以安全地重定向 stdout。每次运行启动 DSH 前，SDK 都会把包内两个 skill 直接覆盖到 `<workspace>/.dsh/skills/`，供 DSH 项目级发现；不会写入 `~/.dsh/skills`，任务结束后也不会删除。`install-skills --workspace` 可提前执行同样的复制操作。`show` 可读取最近一次运行的 request、用户 prompt、manager prompt、plan、verdict 和日志路径。`validate-verdict --request <run>/request.json [--verdict <file>]` 按 SDK 最终验收的同一规则校验 verdict，stdout 输出一个 JSON，通过时退出 0；DSH 按管理者契约在 rename `verdict.json` 前运行它，也可用于人工排查失败的运行。
 
 `.dsh/skills/` 和 `.dsh-conductor/` 都是 SDK 生成的运行目录，建议加入项目的 Git 忽略规则。
 

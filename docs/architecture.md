@@ -68,7 +68,7 @@ receipt 加载和 accepted verdict 校验都会检查结果文件非空且为 UT
 | DSH `turn/end.reason.kind` 与 `session.status=idle` | 管理回合在协议层结束 |
 | 通过 schema 校验的 `verdict.json` 且 status 为 accepted | DSH 已独立验证全部计划验收项 |
 
-屏幕稳定、worker 自述、DSH 最后一条自然语言消息和产物偶然出现都不能替代这些事实。accepted verdict 还必须绑定选定 agent 的每一轮 receipt、覆盖全部 criterion id、只引用工作区内相对路径，并确保产物真实存在。
+屏幕稳定、worker 自述、DSH 最后一条自然语言消息和产物偶然出现都不能替代这些事实。accepted verdict 还必须绑定选定 agent 的每一轮 receipt、覆盖全部 criterion id、只引用工作区内相对路径，并确保产物真实存在。第 `attempts` 轮回执必须是 ready_for_verification，blocked 回执不能支撑 accepted。DSH 在 rename verdict 前运行 `conductor validate-verdict` 自检，该命令复用 SDK 最终校验；SDK 在回合结束后仍独立重新校验。
 
 ## 监督与恢复
 
