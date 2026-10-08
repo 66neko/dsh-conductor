@@ -16,7 +16,7 @@ from typing import Any, Sequence
 
 from . import __version__
 from .dsh import DshError, probe_dsh
-from .models import AgentKind, RecordError, read_json_object
+from .models import AgentKind, ExecutionPlan, RecordError, Verdict, read_json_object
 from .progress import RunEvent
 from .sdk import Conductor, ConductorConfig, ConductorError
 from .runtime import cleanup_run
@@ -163,6 +163,27 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
     return 1 if report.status == "incomplete" else 0
 
 
+def cmd_validate_verdict(args: argparse.Namespace) -> int:
+    # 与 SDK 最终校验共用 Verdict.load，供 DSH 在 rename 前自检语义错误。
+    try:
+        request = read_json_object(args.request)
+        plan = ExecutionPlan.load(Path(str(request["plan_file"])), expected_run_id=str(request["run_id"]))
+        agent = next((item for item in request["agents"] if item["agent"] == plan.agent.value), None)
+        if agent is None:
+            raise RecordError(f"request has no definition for agent {plan.agent.value!r}")
+        receipts = tuple((Path(str(item["receipt_file"])), str(item["token"])) for item in agent["attempts"])
+        verdict_file = args.verdict if args.verdict is not None else Path(str(request["verdict_file"]))
+        verdict = Verdict.load(verdict_file, plan=plan, max_attempts=int(request["max_attempts"]),
+                               workspace=Path(str(request["workspace"])), expected_receipts=receipts)
+        if verdict.status == "accepted" and plan.agent.value not in request["available_agents"]:
+            raise RecordError(f"accepted verdict selected unavailable agent {plan.agent.value!r}")
+    except (RecordError, KeyError, TypeError, ValueError) as exc:
+        _json({"schema_version": 1, "status": "invalid", "error": str(exc)})
+        return 1
+    _json({"schema_version": 1, "status": "valid", "verdict_status": verdict.status, "attempts": verdict.attempts})
+    return 0
+
+
 def cmd_show(args: argparse.Namespace) -> int:
     if args.state_dir is not None:
         state_root = args.state_dir.expanduser().resolve()
@@ -292,6 +313,10 @@ def build_parser() -> argparse.ArgumentParser:
     show.add_argument("--workspace", type=Path)
     show.add_argument("--state-dir", type=Path)
     show.set_defaults(func=cmd_show)
+    validate = commands.add_parser("validate-verdict", help="按 SDK 最终规则校验 verdict 文件")
+    validate.add_argument("--request", type=Path, required=True)
+    validate.add_argument("--verdict", type=Path, help="待校验文件，默认 request 中的 verdict_file")
+    validate.set_defaults(func=cmd_validate_verdict)
     return parser
 
 

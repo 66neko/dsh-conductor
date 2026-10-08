@@ -11,7 +11,7 @@
 | `conductor/lifecycle.py` | 可取消等待、共享截止时间、工作区锁和有限子进程调用 |
 | `conductor/runtime.py` | 私有 socket、资源元数据、清理报告与 `cleanup_run` |
 | `conductor/processes.py` | Linux 进程启动身份、受管 session/组核验与终止 |
-| `conductor/cli.py` | CLI 参数、stderr 事件渲染、JSON stdout、doctor/install/show |
+| `conductor/cli.py` | CLI 参数、stderr 事件渲染、JSON stdout、doctor/install/show/validate-verdict |
 | `conductor/dsh.py` | `dsh --profile sdk` JSON-RPC/stdio 客户端 |
 | `conductor/state.py` | 运行目录、候选 agent 会话、attempt 和 receipt 路径 |
 | `conductor/models.py` | plan、receipt、verdict 的 schema 与事实校验 |

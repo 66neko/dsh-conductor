@@ -143,6 +143,11 @@ def build_prompt(
         )
         for kind in AgentKind
     )
+    # -P 不把当前目录加入 sys.path，避免工作区内同名 conductor 目录遮蔽 SDK。
+    validate_command = _command(
+        ["python3.13", "-P", "-m", "conductor", "validate-verdict", "--request", str(state.request_file),
+         "--verdict", f"{state.verdict_file}.tmp"]
+    )
     availability = ", ".join(kind.value for kind in AgentKind if kind in available_agents) or "无"
     heartbeat_rule = (
         "SDK waiting 心跳也重置计时；持续心跳会阻止静默超时，但不代表 worker 正常，仍须检查 watch 周期返回的屏幕。"
@@ -251,11 +256,23 @@ recover 与反复卡住的菜单选择共享 request 规定的恢复预算，整
 ID、你的观察证据和明确修正要求写入所选 agent 的下一轮 task 文件，再执行对应精确 send 命令。
 每轮返工后重新验证相关验收项，最多提交 {max_attempts} 轮。
 
+receipt 为 blocked 表示 worker 声明本轮未完成，该轮不能作为 accepted 的最终交接，即使你验证
+全部通过也不行。阻塞可以处理且还有轮次时，把阻塞原因、你的验收证据和明确要求写入下一轮 task
+文件并执行 send，要求 worker 处理阻塞或确认完成后提交 ready_for_verification 回执；没有剩余
+轮次或阻塞无法处理时，先 stop，再写 rejected，在 `remaining_issues` 中写明阻塞原因。
+
 ## 4. 最终 verdict
 
 无论成功、失败、环境不可用、worker 阻塞或命令失败，都必须写 verdict。先写
-`{state.verdict_file}.tmp`，用 Python 3.13 解析确认合法，再原子 rename 到
-`{state.verdict_file}`。schema 如下：
+`{state.verdict_file}.tmp`，执行下方校验命令，输出 `"status": "valid"` 后再原子 rename 到
+`{state.verdict_file}`。校验命令使用 SDK 最终验收的同一规则；输出 invalid 时按 error 修正
+verdict（必要时继续返工或改写 rejected）并重新校验，不得跳过或绕过：
+
+```bash
+{validate_command}
+```
+
+schema 如下：
 
 ```json
 {json.dumps(verdict_example, ensure_ascii=False, indent=2)}
@@ -263,7 +280,9 @@ ID、你的观察证据和明确修正要求写入所选 agent 的下一轮 task
 
 verdict 的 `agent` 必须与 plan 一致；`checks` 必须且只能覆盖 plan 中全部验收项 ID。只有你独立
 验证所有 check 均通过时才能写 accepted。rejected 必须包含非空 `remaining_issues`。
-`artifacts` 只能使用工作区内的相对路径，`attempts` 是实际提交给 worker 的轮数。
+`artifacts` 只能使用工作区内的相对路径，`attempts` 是实际提交给 worker 的轮数，即最后一次
+run/send 的轮次编号；recover 沿用当前轮，不增加轮数。accepted 时第 1 至第 `attempts` 轮都必须
+有有效 receipt，且第 `attempts` 轮 receipt 必须是 ready_for_verification。
 
 rejected 前必须 stop；keep_session 只允许保留 accepted 的会话。全局超时由 SDK 停止 worker 并保留诊断文件。
 正常验收结束时：{close_instruction}
