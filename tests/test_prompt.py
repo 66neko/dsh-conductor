@@ -38,18 +38,16 @@ class PromptTests(unittest.TestCase):
             self.assertIn("claude_session.py run", prompt)
             self.assertIn("codex_session.py run", prompt)
             self.assertIn(str(state.plan_file), prompt)
-            self.assertIn("验收项 ID 必须唯一", prompt)
-            self.assertIn("不能在中途切换 agent", prompt)
+            self.assertIn("checks 必须覆盖 plan 中全部验收项 ID", prompt)
+            self.assertIn("一次运行只能选择一个 agent", prompt)
             self.assertNotIn("include_report=true", prompt)
             full = build_prompt(state, skill_scripts={kind: Path("/skill/controller.py") for kind in AgentKind},
                                 available_agents=set(AgentKind), max_attempts=2, worker_idle_timeout_seconds=60,
                                 keep_session=False, include_report=True)
-            self.assertIn("subtask-reports.json", full)
-            self.assertIn("没有内部子任务也必须写空清单", full)
-            self.assertIn("不逐项展示检查结果", full)
+            self.assertIn("include_report=true", full)
+            self.assertIn("result.md", full)
             self.assertIn("verdict.checks 完整记录每项检查", full)
             self.assertIn("verdict.summary 用一两句话", full)
-            self.assertIn("不逐项复述检查方法、证据或产物列表", full)
 
 
 if __name__ == "__main__":

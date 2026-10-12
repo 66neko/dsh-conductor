@@ -22,9 +22,9 @@ class SdkTests(unittest.TestCase):
                 payload = result.to_json()
                 self.assertIn("完整检查结果", payload["report"])
                 agent_name = {"claude": "Claude Code", "codex": "Codex"}[agent]
-                self.assertIn(f"### {agent_name} 第 1 轮报告", payload["report"])
-                self.assertIn("## 二、任务验收报告", payload["report"])
-                self.assertIn("最终结论：通过（accepted）", payload["report"])
+                self.assertIn(f"使用 {agent_name} 执行", payload["report"])
+                self.assertIn("## 验收结果", payload["report"])
+                self.assertIn("**✓ 通过**", payload["report"])
                 self.assertIn("fixture accepted", payload["report"])
                 self.assertNotIn("criterion-1", payload["report"])
                 self.assertNotIn("test fixture", payload["report"])
@@ -53,7 +53,7 @@ class SdkTests(unittest.TestCase):
             with mock.patch("conductor.skills.shutil.which", return_value="/bin/true"):
                 result = Conductor(directory, config).run("拒绝任务")
             self.assertFalse(result.accepted)
-            self.assertIn("未通过（rejected）", result.report)
+            self.assertIn("**✗ 未通过**", result.report)
             self.assertTrue(result.report_warnings)
 
     def test_report_timeout_preserves_error_and_never_accepts_unvalidated_verdict(self) -> None:
@@ -67,8 +67,8 @@ class SdkTests(unittest.TestCase):
             error = caught.exception
             self.assertEqual(error.code, "timeout")
             self.assertIsNone(error.result)
-            self.assertIn("未形成可返回的有效验收结论", error.report)
-            self.assertNotIn("最终结论：通过", error.report)
+            self.assertIn("未形成有效验收结论", error.report)
+            self.assertNotIn("**✓ 通过**", error.report)
             self.assertEqual(error.to_json()["status"], "error")
 
     def test_include_report_requires_boolean(self) -> None:

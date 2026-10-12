@@ -63,11 +63,10 @@ class AgentControllerTests(unittest.TestCase):
         self.assertIn("/tmp/result.md", prompt)
         self.assertIn(" complete ", prompt)
         self.assertNotIn("subtask-reports.json", prompt)
+        # include_report 参数已废弃，不再生成子任务报告
         full = _submission_prompt(task_file=Path("/tmp/task.md"), script=Path("/skill/controller.py"),
                                   receipt=Path("/tmp/receipt.json"), token="token-a", include_report=True)
-        self.assertIn("subtask-reports.json", full)
-        self.assertIn('"receipt_token":"token-a"', full)
-        self.assertIn("所有后代", full)
+        self.assertNotIn("subtask-reports.json", full)
 
 
 if __name__ == "__main__":
