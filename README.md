@@ -271,7 +271,7 @@ Codex 使用 bracketed paste，先读屏确认草稿，再发送 Enter；草稿�
 |---|---:|---|
 | `worker_idle_timeout_seconds` | 300 | 连续没有活动的阈值，替代旧 `attempt_timeout_seconds` |
 | `sdk_heartbeat_counts_as_activity` | True | SDK waiting 心跳也重置活动时钟 |
-| `max_recovery_attempts` | 5 | 全 run 主动恢复上限，可设 1–5 |
+| `max_recovery_attempts` | 5 | 全 run 主动恢复上限，可设 1–5；Codex 重连单独计数，不消耗此预算 |
 | `max_attempts` | 2 | 业务委派总轮数（含首轮），与恢复次数分开 |
 | `timeout_seconds` | 3600 | 整个 run 的总预算，包含准备、初始化、执行、验收和清理 |
 | `cleanup_timeout_seconds` | 5 | 清理阶段上限，同时受总截止时间限制 |

@@ -9,6 +9,8 @@ from unittest import mock
 from concurrent.futures import ThreadPoolExecutor
 
 from conductor.agents.codex import CODEX
+from conductor.errors import OperationError
+from conductor.lifecycle import Budget
 from conductor.models import AgentKind
 from conductor.state import RunState, atomic_write_json
 from conductor.supervision import Supervisor, SupervisionError
@@ -212,6 +214,188 @@ class SupervisionTests(unittest.TestCase):
         self.assertEqual(result['silence_seconds'], 0)
         self.now += 300
         self.assertEqual(self.supervisor.poll()['reason'], 'silent')
+
+    def reconnect_screen(self, text: str) -> None:
+        self.session.capture.return_value = text + '\n› '
+        self.session.activity_status.return_value = f'2:{len(text.splitlines())}:1::1'
+
+    def test_automatic_reconnect_waits_across_watches_even_on_last_retry_or_silence(self) -> None:
+        self.running()
+        for total in (1, 3, 5, 8, 20, 99):
+            with self.subTest(total=total):
+                self.reconnect_screen(f'Network error\n• Reconnecting... {total}/{total} (10s • esc to interrupt)')
+                self.supervisor.poll()
+                self.now += 301  # 自动重连仍在进行时，不因静默而提前恢复。
+                for _ in range(2):
+                    result = self.new_supervisor().watch(wait_seconds=0)
+                    self.assertEqual((result['status'], result['reason'], result['recoveries']),
+                                     ('reconnecting', 'review', 0))
+                    self.assertGreaterEqual(result['silence_seconds'], 300)
+                with self.assertRaisesRegex(SupervisionError, 'keep watching'):
+                    self.supervisor.recover(observation=result['id'], reason='继续', interrupt=True)
+                with self.assertRaisesRegex(SupervisionError, 'keep watching'):
+                    self.supervisor.reconnect(observation=result['id'], reason='重连')
+                with self.assertRaisesRegex(SupervisionError, 'keep watching'):
+                    self.supervisor.choose(observation=result['id'], keys=['Enter'], reason='选择')
+        self.session.send_text.assert_called_once()
+        self.session.send_keys.assert_called_once_with('Enter')
+        self.session.close.assert_not_called()
+
+    def test_automatic_reconnect_blocks_startup_dispatch_and_submission_timeout(self) -> None:
+        self.reconnect_screen('Network error\nReconnecting... 1/5')
+        self.assertEqual(self.supervisor.poll()['status'], 'reconnecting')
+        self.now += 31
+        self.assertEqual(self.supervisor.poll()['status'], 'reconnecting')
+        self.session.send_text.assert_not_called()
+        self.session.capture.return_value = '› '
+        self.session.activity_status.return_value = '2:0:1::1'
+        self.paste()
+        self.reconnect_screen('Network error\nReconnecting... 2/5')
+        self.now += 31
+        result = self.new_supervisor().poll()
+        self.assertEqual((result['status'], result['phase']), ('reconnecting', 'submitting'))
+        self.session.send_text.assert_called_once()
+        self.session.send_keys.assert_not_called()
+
+    def test_automatic_reconnect_still_obeys_run_deadline(self) -> None:
+        self.running()
+        self.reconnect_screen('Network error\nReconnecting... 1/5')
+        self.supervisor.budget = Budget(self.now + 15, phase='worker_run')
+        with (mock.patch('conductor.supervision.time.monotonic', side_effect=lambda: self.now),
+              mock.patch('conductor.supervision.time.sleep', side_effect=lambda seconds: setattr(self, 'now', self.now + seconds))):
+            with self.assertRaises(OperationError) as caught:
+                self.supervisor.watch(wait_seconds=60)
+        self.assertEqual(caught.exception.code, 'timeout')
+        self.session.send_text.assert_called_once()
+
+    def test_automatic_reconnect_resumes_without_recovering_historical_network_error(self) -> None:
+        self.running()
+        self.reconnect_screen('Network error\nReconnecting... 1/5')
+        self.assertEqual(self.supervisor.poll()['status'], 'reconnecting')
+        self.reconnect_screen('Network error\nReconnecting... 1/5\n• Working (5s • esc to interrupt)')
+        result = self.new_supervisor().poll()
+        self.assertEqual((result['status'], result['recoveries'], result['reconnects']), ('running', 0, 0))
+        self.receipt()
+        self.assertEqual(self.supervisor.poll()['status'], 'receipt_ready')
+        self.session.send_text.assert_called_once()
+
+    def test_exhausted_reconnect_retries_use_separate_persistent_count_after_recovery_limit(self) -> None:
+        self.running()
+        with self.supervisor.locked() as state:
+            state['recoveries'] = 5
+            self.supervisor.save(state)
+        for count in range(1, 7):
+            self.reconnect_screen('■ exceeded retry limit, last status: 503')
+            attention = self.new_supervisor().watch(wait_seconds=0)
+            self.assertEqual(attention['reason'], 'reconnect_required')
+            with self.assertRaisesRegex(SupervisionError, 'use reconnect'):
+                self.supervisor.recover(observation=attention['id'], reason='重试')
+            result = self.new_supervisor().reconnect(observation=attention['id'], reason='自动重试耗尽')
+            self.assertEqual((result['status'], result['recoveries'], result['reconnects'], result['attempt']),
+                             ('reconnecting', 5, count, 1))
+            # 旧错误留在屏幕时，先完成本次输入确认，不能再派发重连。
+            self.assertEqual(self.new_supervisor().poll()['status'], 'submitting')
+            self.draft()
+            self.now += 10
+            self.assertEqual(self.new_supervisor().poll()['status'], 'submitting')
+            self.reconnect_screen('• Reconnecting... 1/5 (1s • esc to interrupt)')
+            self.now += 10
+            self.assertEqual(self.new_supervisor().poll()['status'], 'reconnecting')
+        records = [json.loads(line) for line in self.supervisor.log_file.read_text().splitlines()]
+        reconnects = [row for row in records if row['event'] == 'reconnect']
+        self.assertEqual([row['reconnects'] for row in reconnects], list(range(1, 7)))
+        self.assertTrue(all(row['recoveries'] == 5 for row in reconnects))
+        self.assertFalse(any(row['event'] == 'recovery' for row in records))
+        self.factory.create.assert_called_once()
+
+    def test_reconnect_submission_enter_retries_do_not_charge_error_recovery_budget(self) -> None:
+        self.running()
+        self.reconnect_screen('■ stream disconnected before completion: request timed out')
+        attention = self.supervisor.poll()
+        result = self.supervisor.reconnect(observation=attention['id'], reason='重新连接')
+        self.assertEqual(result['reconnects'], 1)
+        self.draft()
+        self.now += 10
+        self.supervisor.poll()
+        self.now += 10
+        attention = self.new_supervisor().poll()
+        self.assertEqual(attention['reason'], 'submission_pending')
+        result = self.supervisor.choose(observation=attention['id'], keys=['Enter'], reason='补发重连提交')
+        self.assertEqual((result['recoveries'], result['reconnects']), (0, 1))
+        self.receipt()
+        self.start(2)
+        self.session.capture.return_value = '› '
+        self.session.activity_status.return_value = '2:0:1::1'
+        self.session.send_text.reset_mock()
+        self.session.send_keys.reset_mock()
+        self.paste()
+        self.draft()
+        self.now += 10
+        self.supervisor.poll()
+        self.now += 10
+        attention = self.supervisor.poll()
+        result = self.supervisor.choose(observation=attention['id'], keys=['Enter'], reason='补发普通提交')
+        self.assertEqual((result['recoveries'], result['reconnects']), (1, 1))
+
+    def test_interrupted_reconnect_paste_does_not_replay_or_react_to_old_error(self) -> None:
+        self.running()
+        self.reconnect_screen('■ stream disconnected before completion: request timed out')
+        attention = self.supervisor.poll()
+        self.session.send_text.side_effect = TmuxError('interrupted after reconnect paste')
+        with self.assertRaises(TmuxError):
+            self.supervisor.reconnect(observation=attention['id'], reason='自动重试耗尽')
+        self.session.send_text.side_effect = None
+        result = self.new_supervisor().poll()
+        self.assertEqual((result['status'], result['recoveries'], result['reconnects']), ('submitting', 0, 1))
+        self.draft()
+        self.now += 10
+        self.supervisor.poll()
+        self.session.capture.return_value = '■ stream disconnected before completion: request timed out\n› '
+        self.session.activity_status.return_value = '2:1:1::1'
+        self.now += 10
+        self.assertEqual(self.new_supervisor().poll()['status'], 'running')
+        self.assertEqual(self.session.send_text.call_count, 2)  # 首次任务和一次重连；watch 不重放。
+
+    def test_unconfirmed_reconnect_submission_can_recover_without_misreading_old_connection_error(self) -> None:
+        self.running()
+        self.reconnect_screen('■ exceeded retry limit, last status: 503')
+        attention = self.supervisor.poll()
+        self.supervisor.reconnect(observation=attention['id'], reason='重新连接')
+        self.now += 30  # 粘贴未进入输入框，属于提交故障，旧网络错误已被处理。
+        attention = self.new_supervisor().poll()
+        self.assertEqual(attention['reason'], 'submission_unconfirmed')
+        result = self.supervisor.recover(observation=attention['id'], reason='输入为空，重试未确认的提交')
+        self.assertEqual((result['recoveries'], result['reconnects']), (1, 1))
+
+    def test_reconnect_rejects_unrelated_errors_stale_observations_and_receipts(self) -> None:
+        self.running()
+        self.reconnect_screen('Network error')
+        attention = self.supervisor.poll()
+        with self.assertRaisesRegex(SupervisionError, 'requires exhausted automatic retries'):
+            self.supervisor.reconnect(observation=attention['id'], reason='普通错误')
+        self.reconnect_screen('■ exceeded retry limit, last status: 503')
+        attention = self.supervisor.poll()
+        self.supervisor.reconnect(observation=attention['id'], reason='自动重试耗尽')
+        with self.assertRaisesRegex(SupervisionError, 'stale'):
+            self.supervisor.reconnect(observation=attention['id'], reason='重复指令')
+        self.reconnect_screen('Reconnecting... 1/5')
+        self.supervisor.poll()
+        self.reconnect_screen('■ exceeded retry limit, last status: 503')
+        attention = self.supervisor.poll()
+        self.receipt()
+        with self.assertRaisesRegex(SupervisionError, 'receipt has arrived'):
+            self.supervisor.reconnect(observation=attention['id'], reason='已经完成')
+
+    def test_receipt_exit_and_sdk_stop_preempt_automatic_reconnect(self) -> None:
+        self.running()
+        self.reconnect_screen('Network error\nReconnecting... 1/5')
+        self.session.status.return_value.pane_dead = True
+        self.assertEqual(self.supervisor.poll()['reason'], 'worker_exited')
+        self.session.status.return_value.pane_dead = False
+        self.receipt()
+        self.assertEqual(self.supervisor.poll()['status'], 'receipt_ready')
+        atomic_write_json(self.run.root / 'sdk-stop.json', {'reason': 'test'})
+        self.assertEqual(self.supervisor.poll()['status'], 'stopped')
 
     def test_report_or_screen_cannot_replace_receipt(self) -> None:
         self.running()

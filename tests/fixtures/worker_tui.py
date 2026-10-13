@@ -49,7 +49,14 @@ screen("1. Continue\nUse arrows to select")
 while sys.stdin.buffer.read(1) != b"\r":
     pass
 receive(1)
-receive(2, "Network error\n")
+if "--reconnect" in sys.argv[4:]:
+    retries = int(sys.argv[sys.argv.index("--reconnect-retries") + 1])
+    screen(f"Network error\n• Reconnecting... {retries}/{retries} (10s • esc to interrupt)\n" + glyph + " ")
+    while not (root / "finish-reconnect").exists():
+        time.sleep(.01)
+    receive(2, "■ exceeded retry limit, last status: 503\n")
+else:
+    receive(2, "Network error\n")
 (root / "result.md").write_text("Complete UTF-8 report", encoding="utf-8")
 (root / "receipt.json").write_text(json.dumps({
     "schema_version": 1, "token": token, "status": "ready_for_verification", "summary": "done",

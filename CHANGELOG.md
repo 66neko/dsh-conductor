@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.6.1] - 2026-10-13
+
+### Fixed
+
+- Keep watching while Codex is automatically reconnecting, without treating connection error details or inactivity as ordinary worker failures.
+- Support any configured reconnect retry limit (`N/M`), including waiting for the final retry to finish instead of assuming a fixed `5/5` limit.
+- Resume the original task through the dedicated `reconnect` command only after automatic retries have failed. Count reconnects and their Enter resubmissions separately from the error recovery budget.
+- Preserve the original attempt and receipt token across reconnects, while keeping the run deadline, cancellation, and worker shutdown safeguards.
+- Accept bracketed version headings when extracting GitHub Release notes from this changelog.
+
+### Validation
+
+- Add adapter and supervision coverage for configurable retry limits, terminal connection failures, resumed execution, and independent reconnect accounting.
+- Exercise reconnect recovery in real tmux sessions with retry limits of 3 and 12.
+
+---
+
 ## [0.6.0] - 2026-10-12
 
 ### 🎯 Major Refactoring - Streamlined Architecture
@@ -106,6 +123,7 @@ worker result...
 
 ---
 
+[0.6.1]: https://github.com/66neko/dsh-conductor/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/yu/dsh-conductor/compare/v0.5.4...v0.6.0
 [0.5.4]: https://github.com/yu/dsh-conductor/compare/v0.5.3...v0.5.4
 [0.5.3]: https://github.com/yu/dsh-conductor/compare/v0.5.2...v0.5.3

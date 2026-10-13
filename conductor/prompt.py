@@ -45,9 +45,12 @@ def _agent_commands(
         retry_commands.append(f"第 {attempt.number} 轮：`{attempt.task_file}` → `{attempt.result_file}`\n```bash\n{command}\n```")
 
     retries = "\n\n".join(retry_commands) or "没有可用的返工轮次。"
+    control_names = ["watch", "recover", "choose", "stop"]
+    if agent.kind == AgentKind.CODEX:
+        control_names.append("reconnect")
     controls = "\n".join(
         f"- `{name}`：`{_command(['python3.13', str(skill_script), name, '--request', str(state.request_file), '--session', agent.session])}`"
-        for name in ("watch", "recover", "choose", "stop")
+        for name in control_names
     )
 
     return f"""### {agent.kind.value}
@@ -166,7 +169,7 @@ attempts=0，每个验收项标记失败并说明环境证据。
 落盘后才写 receipt。
 
 run/send 只登记任务并立即返回，不代表完成。随后持续调用 watch，每次最多等待 300 秒且不超过
-剩余执行时间。watch 返回 starting/submitting/running 时检查状态后继续 watch，不能重复 run/send。
+剩余执行时间。watch 返回 starting/submitting/running/reconnecting 时检查状态后继续 watch，不能重复 run/send。
 watch 在就绪后自动提交已登记的任务。
 
 连续 {worker_idle_timeout_seconds} 秒无活动时返回 needs_attention。任何 worker 终端字节、重复错误、
@@ -175,14 +178,16 @@ spinner、计时器、光标变化均重置静默时钟。{heartbeat_note}
 根据返回的屏幕、snapshot_file、实际文件和进程状态判断：
 
 - **网络/模型暂时失败：** 确认输入界面可用后 recover 继续；必要时 --interrupt
+- **Codex 正在 Reconnecting：** 自动重试期间继续 watch，不 recover、choose 或中断；显示最后一次重试仍须等待结束
+- **Codex reconnect_required：** 自动重试耗尽且未恢复，用 reconnect 继续原任务，不扣错误恢复次数
 - **输入框等待选择：** 根据任务用 choose 提供精确按键及理由
-- **submission_pending：** 任务在输入框，用 choose --keys Enter 补发（计入恢复预算）
+- **submission_pending：** 任务在输入框，用 choose --keys Enter 补发（普通提交计入恢复预算，重连提交除外）
 - **submission_unconfirmed：** 检查快照和屏幕，仅在输入框空且未忙时 recover
 - **声称完成却缺文件：** recover 要求补齐；无效回执归档后由 worker 重写
 - **明确失败或恢复额度耗尽：** stop 保存末屏并终止，写 rejected verdict
 
 recover 与反复菜单共享全 run 最多 5 次恢复预算；首次普通菜单选择免费。每次操作后重新观察，
-不连续堆积"继续"。
+不连续堆积"继续"。Codex reconnect 及其提交补发单独计数，不受错误恢复次数限制，但仍受全 run 截止时间限制。
 
 只有 watch 返回 receipt_ready 才代表收到 token-bound receipt。终端文字可用于诊断、恢复、选择
 和失败判断，不能作为成功依据。完整内容从 result_file 读取。

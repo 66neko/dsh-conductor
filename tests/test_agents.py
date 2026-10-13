@@ -7,13 +7,57 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
-from conductor.agents.base import main, _submission_prompt
+from conductor.agents.base import build_parser, main, _submission_prompt
 from conductor.agents.claude import CLAUDE
 from conductor.agents.codex import CODEX
 from conductor.models import WorkerReceipt
 
 
 class AgentControllerTests(unittest.TestCase):
+    def test_codex_distinguishes_active_reconnect_from_exhausted_and_historical_errors(self) -> None:
+        for screen, expected in (
+            ('Network error\n• Reconnecting... 1/5 (2s • esc to interrupt)\n› ', 'reconnecting'),
+            ('\n\n• Reconnecting... 5/5 (10s • esc to interrupt)\n'
+             '  stream disconnected before completion: request timed out\n› ', 'reconnecting'),
+            ('Reconnecting… 2/5\nconnection failed\n› ', 'reconnecting'),
+            ('• Reconnecting to server…\n› ', 'reconnecting'),
+            ('■ exceeded retry limit, last status: 503\n› ', 'retry_exhausted'),
+            ('■ stream disconnected before completion: error sending request\n› ', 'retry_exhausted'),
+            ('• Working (1s • esc to interrupt)\nReconnecting... 5/5\n'
+             '■ stream disconnected before completion\n› ', 'retry_exhausted'),
+            ('Network error\nReconnecting... 1/5\n• Working (5s • esc to interrupt)\n› ', None),
+            ('■ stream disconnected before completion\n› 继续原任务\n'
+             '• Working (5s • esc to interrupt)\n› ', None),
+            ('Reconnecting... 1/5\n› 继续原任务\n任务完成\n› ', None),
+            ('已检查 reconnect 的兼容\n› ', None),
+            ('Network error\n› ', None),
+        ):
+            with self.subTest(screen=screen):
+                self.assertEqual(CODEX.reconnection_status(screen), expected)
+                self.assertIsNone(CLAUDE.reconnection_status(screen))
+
+    def test_only_codex_exposes_reconnect_command(self) -> None:
+        args = ['reconnect', '--request', '/tmp/request.json', '--session', 'worker',
+                '--observation', '3', '--reason', '自动重试耗尽']
+        self.assertEqual(build_parser(CODEX).parse_args(args).command, 'reconnect')
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            build_parser(CLAUDE).parse_args(args)
+
+    def test_codex_reconnect_status_is_independent_of_configured_retry_count(self) -> None:
+        for total in (1, 3, 5, 8, 20, 99):
+            for current in sorted({1, total}):
+                for ellipsis in ('...', '…'):
+                    with self.subTest(current=current, total=total, ellipsis=ellipsis):
+                        status_line = f'• Reconnecting{ellipsis} {current}/{total}'
+                        active = status_line + ' (10s • esc to interrupt)\n'
+                        error = '■ stream disconnected before completion: request timed out\n'
+                        self.assertEqual(CODEX.reconnection_status(active + error + '› '), 'reconnecting')
+                        # 只有终态错误才要求手动重连，计数本身不能证明已耗尽。
+                        self.assertEqual(CODEX.reconnection_status(status_line + '\n' + error + '› '),
+                                         'retry_exhausted')
+                        self.assertIsNone(CODEX.reconnection_status(status_line + '\n'
+                                          '• Working (1s • esc to interrupt)\n› '))
+
     def test_codex_distinguishes_composer_from_identical_history(self) -> None:
         submitted = '› <dsh_conductor_handoff>\n  任务\n  </dsh_conductor_handoff>\n'
         for screen, cursor, expected in (

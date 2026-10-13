@@ -8,6 +8,37 @@ from .base import AgentAdapter, main as adapter_main
 
 
 class CodexAdapter(AgentAdapter):
+    def reconnection_status(self, screen: str) -> str | None:
+        """不依赖重试次数；自动重连状态优先于错误详情，耗尽只认终态。"""
+        prompts = list(re.finditer(r"^›", screen, re.MULTILINE))
+        if len(prompts) > 1:
+            # 最后一个 › 是输入框，之前一个是最新用户消息；更早的状态属于历史。
+            screen = screen[prompts[-2].start():]
+        reconnects = list(re.finditer(
+            r"^[ \t]*(?:[•●◦⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏][ \t]*)?"
+            r"Reconnecting(?:\.{3}|…|\s+to\s+server)", screen, re.IGNORECASE | re.MULTILINE,
+        ))
+        failures = list(re.finditer(
+            r"exceeded (?:stream )?retry limit|(?:retry|reconnect(?:ion)?) (?:limit|attempts|retries) exhausted|"
+            r"stream disconnected before completion|failed to reconnect",
+            screen, re.IGNORECASE,
+        ))
+        busy = list(self.busy_hint.finditer(screen))
+        last_reconnect = reconnects[-1].start() if reconnects else -1
+        last_failure = failures[-1].start() if failures else -1
+        # 忽略更早任务的忙碌提示；当前重连行的 interrupt 提示仍表示重试在进行。
+        current_busy = busy and busy[-1].start() > max(last_reconnect, last_failure)
+        reconnect_busy = (reconnects and busy and busy[-1].start() > last_reconnect
+                          and "\n" not in screen[last_reconnect:busy[-1].start()])
+        if failures and not current_busy and not reconnect_busy and last_failure > last_reconnect:
+            return "retry_exhausted"
+        if reconnects:
+            # --no-alt-screen 保留旧状态行；后来的 Working 状态表示自动重连已恢复。
+            if busy and "\n" in screen[last_reconnect:busy[-1].start()]:
+                return None
+            return "reconnecting"
+        return None
+
     def submission_status(self, screen: str, activity_status: str) -> str:
         """只检查光标所在的最后一个输入框，历史用户消息也使用 ›，不能混淆。"""
         try:

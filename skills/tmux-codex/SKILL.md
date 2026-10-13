@@ -46,6 +46,7 @@ sdk-stop.json 出现后不得继续派发、选择或恢复。同步调用，不
 | `starting` | 尚在启动或等待输入界面就绪，继续 watch |
 | `submitting` | 已开始粘贴，尚未确认 Codex 接收；继续 watch |
 | `running` | 已确认提交，检查屏幕和 observation |
+| `reconnecting` | Codex 正在自动重连，继续 watch，等待自动重试结束 |
 | `needs_attention` | 根据 reason、屏幕和 snapshot_file 决定观察、选择、恢复或结束 |
 | `receipt_ready` | 有效 token 回执与结果文件已就绪，读取文件并独立验收 |
 | `stopped` | worker 已结束，记录失败证据并写 rejected verdict |
@@ -55,7 +56,8 @@ sdk-stop.json 出现后不得继续派发、选择或恢复。同步调用，不
 Enter 后草稿仍在时，下次采样提前返回 `submission_pending`。
 
 遇到 `submission_pending`，查看当前屏幕，用 `choose --keys Enter` 补发一次提交；
-每次补发计入全 run 最多 5 次恢复预算。草稿还在时禁止 recover 追加"继续"或重新粘贴任务。
+普通提交的每次补发计入全 run 最多 5 次恢复预算，reconnect 的提交补发除外。
+草稿还在时禁止 recover 追加"继续"或重新粘贴任务。
 
 遇到 `submission_unconfirmed`，先检查快照和当前屏幕；只有确认输入框为空且未在忙时才 recover 重试，
 必要时有依据地 interrupt。无法确定或恢复耗尽则 stop。
@@ -69,6 +71,30 @@ Codex 执行中通常显示 `• Working (1m 05s • esc to interrupt)`。worker
 
 菜单、错误提示、无效回执、worker 退出或监测管道失效会提前返回。历史错误若已恢复，
 使用 `watch --acknowledge <id>` 继续观察。
+
+## 自动重连与重试耗尽
+
+出现 `Reconnecting... N/M`、`Reconnecting…` 或 `Reconnecting to server…` 时，控制器返回
+`reconnecting`。N 为当前重试次数，M 为用户配置的总次数，可为任意数值。自动重连期间的
+网络错误和活动静默不触发错误恢复。继续 watch；即使 N 已等于 M，只要仍显示自动重连，
+也必须等这次重试结束，不发送 recover、选择按键或中断。是否耗尽依据连接终态错误判断，
+不依据固定次数，也不单凭 N/M 判断。
+
+自动重试结束后仍有 `exceeded retry limit` 或 `stream disconnected before completion` 等
+连接终态错误时，watch 返回 `needs_attention` / `reconnect_required`。确认输入框空且 worker
+已停止执行后，使用专用重连命令：
+
+```bash
+python3.13 <skill>/scripts/codex_session.py reconnect \
+  --request /absolute/run/request.json --session dsh-codex-unique \
+  --observation 5 --reason 'Codex 自动重试耗尽，重新连接并继续原任务'
+```
+
+reconnect 通过原会话发送继续当前任务的指令及原交接协议，沿用 attempt/token，并通过
+watch 确认输入已提交；它不是 Codex 的 slash 命令。每次操作后必须重新 watch，不连续堆积
+指令。重连次数单独持久化为 `reconnects`，不扣 `recoveries`，重连提交需要补发 Enter 时也
+不扣错误恢复次数。即使错误恢复预算已耗尽，也可在确认自动重试耗尽后 reconnect。
+自动等待和手动重连仍受整个 run 的截止时间、取消和 sdk-stop.json 限制。
 
 ## 主动恢复与选择
 
@@ -88,7 +114,7 @@ recover 默认发送"继续当前任务"及原任务交接协议，也可用 `--
 DSH 代为判断交互选择，明确当前选项及理由，再发送按键。每次操作后都要观察是否生效。
 
 主动恢复、补发提交 Enter 和反复卡住的菜单共享整个 run 的恢复预算，最多 5 次；首次普通菜单确认免费。
-次数保存在 supervision.json，watch 重启及业务返工均不重置。
+Codex 重连及其提交补发除外。次数保存在 supervision.json，watch 重启及业务返工均不重置。
 
 ## 结束与排查
 

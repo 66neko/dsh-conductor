@@ -64,7 +64,7 @@ class Supervisor:
             state = read_json_object(self.path) if self.path.exists() else {
                 "schema_version": 1, "run_id": self.request["run_id"], "agent": self.adapter.kind,
                 "session": self.session.name, "phase": "new", "recoveries": 0, "attempt": 0,
-                "choices": {}, "observation": 0,
+                "choices": {}, "observation": 0, "reconnects": 0,
             }
             if (state["run_id"], state["agent"], state["session"]) != (
                 self.request["run_id"], self.adapter.kind, self.session.name,
@@ -83,6 +83,7 @@ class Supervisor:
             "time": time.time(), "run_id": state["run_id"], "agent": state["agent"],
             "session": state["session"], "attempt": state["attempt"], "event": event,
             "recoveries": state["recoveries"], "max_recoveries": self.request.get("max_recovery_attempts", 5), **details,
+            "reconnects": state.get("reconnects", 0),
         }
         with self.log_file.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -130,7 +131,8 @@ class Supervisor:
                                    budget=self.budget, runtime_file=self.runtime_file)
             state.update(attempt=number, phase="starting", submission=submission,
                          last_activity_at=time.time(), last_screen=None, last_bytes=0, ready_since=None,
-                         acknowledged=None, observation=None)
+                         acknowledged=None, observation=None, reconnect_status=None,
+                         reconnect_acknowledged=None, submission_kind="task")
             self.save(state)
             self.record(state, "submitted", message="任务已登记，watch 将在输入界面就绪后提交")
             return self.response(state, "starting")
@@ -142,6 +144,7 @@ class Supervisor:
             "session": state["session"], "status": status, "attempt": state["attempt"],
             "phase": state["phase"],
             "recoveries": state["recoveries"], "max_recoveries": self.request.get("max_recovery_attempts", 5),
+            "reconnects": state.get("reconnects", 0),
             "receipt_file": attempt.get("receipt_file"), "result_file": attempt.get("result_file"),
             "silence_seconds": round(max(0, time.time() - state.get("last_activity_at", time.time())), 1),
             **extra,
@@ -153,7 +156,9 @@ class Supervisor:
 
     def dispatch(self, state: JsonObject, session: TmuxSession, text: str) -> None:
         # 在任何输入副作用前保存阶段，控制器中断后不得重放整段任务。
-        state.update(observation=None, acknowledged=None)
+        state["observation"] = None
+        if state.get("submission_kind") != "reconnect":
+            state["acknowledged"] = None
         if self.adapter.confirm_submission:
             state.update(phase="submitting", submission_stage="paste_started",
                          submission_started_at=time.time(), submission_enter_at=None)
@@ -242,11 +247,32 @@ class Supervisor:
             state["last_activity_at"] = max(state["last_activity_at"], min(now, heartbeat_at))
             submission_status = self.adapter.submission_status(screen, activity_status)
             pending = self.adapter.has_pending_submission(screen, activity_status)
+            reconnect_status = self.adapter.reconnection_status(screen)
+            if reconnect_status == "reconnecting" or self.adapter.busy_hint.search(screen):
+                state["reconnect_acknowledged"] = None
+            elif (reconnect_status == "retry_exhausted"
+                  and state.get("reconnect_acknowledged") == self.attention_key("reconnect_required", screen)):
+                reconnect_status = None
+            previous_reconnect = state.get("reconnect_status")
+            state["reconnect_status"] = reconnect_status
+            if reconnect_status == "reconnecting" and previous_reconnect != reconnect_status:
+                self.record(state, "reconnecting", message="Codex 正在自动重连，继续等待，不消耗错误恢复次数")
+            elif previous_reconnect == "reconnecting" and reconnect_status is None and self.adapter.busy_hint.search(screen):
+                # 自动重连后继续执行时，旧错误详情不能再次触发恢复。
+                state["acknowledged"] = self.attention_key("worker_error", screen)
+                self.record(state, "reconnected", message="Codex 已继续执行，完成仍需有效回执")
             reason = None
             if dead:
                 reason = "worker_exited"
             elif not activity_status.endswith(":1"):
                 reason = "monitor_error"
+            elif reconnect_status == "reconnecting":
+                if (state["phase"] == "submitting" and state["submission_stage"] == "enter_sent"
+                        and submission_status == "empty"):
+                    state["phase"] = "running"
+                    self.record(state, "task_sent", message="已确认 Codex 接收输入，等待自动重连")
+            elif reconnect_status == "retry_exhausted":
+                reason = "reconnect_required"
             elif receipt_error:
                 reason = "invalid_receipt"
             elif self.adapter.is_menu(screen):
@@ -269,15 +295,15 @@ class Supervisor:
             elif pending:
                 reason = "submission_pending" if self.adapter.confirm_submission else "input_required"
             # 输入确认优先于活动检测，心跳、spinner 或光标变化不能证明已提交。
-            if (reason is None and state["phase"] != "submitting"
+            if (reason is None and reconnect_status is None and state["phase"] != "submitting"
                     and self.adapter.error_hint.search(screen)
                     and state.get("acknowledged") != self.attention_key("worker_error", screen)):
                 reason = "worker_error"
-            elif (reason is None and state["phase"] != "submitting"
+            elif (reason is None and reconnect_status is None and state["phase"] != "submitting"
                   and now - state["last_activity_at"] >= self.request.get("worker_idle_timeout_seconds", 300)
                   and now >= state.get("observe_until", 0)):
                 reason = "silent"
-            if (state["phase"] == "starting" and reason is None and self.adapter.is_ready(screen)
+            if (state["phase"] == "starting" and reason is None and reconnect_status is None and self.adapter.is_ready(screen)
                     and (not self.adapter.confirm_submission or submission_status == "empty")
                     and not self.adapter.busy_hint.search(screen)):
                 if state["ready_since"] is None:
@@ -294,14 +320,20 @@ class Supervisor:
                 self.save(state)
                 return self.response(state, "needs_attention", **observation, detail=receipt_error,
                                      screen=re.sub(r"\b[a-f0-9]{48}\b", "[token]", screen[-4000:]))
-            if not self.adapter.error_hint.search(screen):
+            # 重连提交尚未开始执行时，重绘可能短暂隐藏旧错误；不能清掉已处理的依据。
+            if not self.adapter.error_hint.search(screen) and not state.get("reconnect_acknowledged"):
                 state["acknowledged"] = None
             self.save(state)
+            if reconnect_status == "reconnecting":
+                return self.response(state, "reconnecting")
             return self.response(state, state["phase"] if state["phase"] in {"starting", "submitting"} else "running")
 
     def attention_key(self, reason: str | None, screen: str) -> str:
         if reason == "worker_error":
             return fingerprint("\n".join(line for line in screen.splitlines() if self.adapter.error_hint.search(line)))
+        if reason == "reconnect_required":
+            return fingerprint("\n".join(line for line in screen.splitlines()
+                                         if self.adapter.reconnection_status(line) == "retry_exhausted"))
         # 选项光标移动不应变成“新的菜单”，相同菜单反复出现要计入恢复预算。
         cleaned = re.sub(r"[❯›►➜✻✽✢✳✶✷]", "", screen)
         cleaned = re.sub(r"\b\d+(?:\.\d+)?\s*(?:ms|s|seconds?|秒)\b|\b\d+:\d+(?::\d+)?\b", "", cleaned, flags=re.I)
@@ -328,7 +360,7 @@ class Supervisor:
         while True:
             result = self.poll()
             remaining = deadline - time.monotonic()
-            if result["status"] not in {"starting", "submitting", "running"}:
+            if result["status"] not in {"starting", "submitting", "running", "reconnecting"}:
                 return result
             if remaining <= 0:
                 # 即使 SDK 心跳持续活动，也周期性交回可供 DSH 判断的屏幕证据。
@@ -368,6 +400,14 @@ class Supervisor:
 
     def recover(self, *, observation: int, reason: str, instruction_file: Path | None = None,
                 interrupt: bool = False) -> JsonObject:
+        return self._resume(observation=observation, reason=reason, instruction_file=instruction_file,
+                            interrupt=interrupt, reconnect=False)
+
+    def reconnect(self, *, observation: int, reason: str) -> JsonObject:
+        return self._resume(observation=observation, reason=reason, reconnect=True)
+
+    def _resume(self, *, observation: int, reason: str, reconnect: bool,
+                instruction_file: Path | None = None, interrupt: bool = False) -> JsonObject:
         instruction = instruction_file.read_text(encoding="utf-8") if instruction_file else "继续当前任务，先检查已有产物，再完成剩余工作并保存结果和回执。"
         if not reason.strip() or not instruction.strip():
             raise SupervisionError("recovery reason and instruction must not be empty")
@@ -376,6 +416,18 @@ class Supervisor:
             session = self.attached()
             screen = self.current_screen(session)
             activity_status = session.activity_status()
+            reconnect_status = self.adapter.reconnection_status(screen)
+            if (not reconnect and reconnect_status == "retry_exhausted"
+                    and state.get("reconnect_acknowledged") == self.attention_key("reconnect_required", screen)):
+                reconnect_status = None
+            if reconnect_status == "reconnecting":
+                raise SupervisionError("worker is reconnecting; keep watching until automatic retries finish")
+            if reconnect:
+                if (state["observation"]["reason"] != "reconnect_required"
+                        or reconnect_status != "retry_exhausted"):
+                    raise SupervisionError("reconnect requires exhausted automatic retries; watch again")
+            elif reconnect_status == "retry_exhausted":
+                raise SupervisionError("automatic reconnect retries exhausted; use reconnect")
             if self.adapter.is_menu(screen) or self.adapter.has_pending_submission(screen, activity_status):
                 raise SupervisionError("worker is waiting for a choice; use choose")
             if (self.adapter.confirm_submission
@@ -384,8 +436,13 @@ class Supervisor:
                 raise SupervisionError("cannot confirm an empty composer; inspect before recovering")
             if not interrupt and (not self.adapter.is_ready(screen) or self.adapter.busy_hint.search(screen)):
                 raise SupervisionError("worker is still busy; explicitly interrupt or keep watching")
-            self.charge(state)
-            self.record(state, "recovery", message=reason, interrupt=interrupt)
+            if reconnect:
+                state.update(reconnects=state.get("reconnects", 0) + 1, observation=None)
+                self.save(state)
+                self.record(state, "reconnect", message=reason)
+            else:
+                self.charge(state)
+                self.record(state, "recovery", message=reason, interrupt=interrupt)
             if interrupt:
                 session.send_keys("C-c")
                 self.pause(1)
@@ -400,11 +457,15 @@ class Supervisor:
             receipt = Path(attempt["receipt_file"])
             if receipt.exists():
                 # 保留错误回执证据，由 worker 重新生成；DSH 不代签。
-                receipt.rename(receipt.with_name(f"receipt.invalid-{state['recoveries']}.json"))
+                suffix = f"reconnect-{state['reconnects']}" if reconnect else str(state["recoveries"])
+                receipt.rename(receipt.with_name(f"receipt.invalid-{suffix}.json"))
+            state["submission_kind"] = "reconnect" if reconnect else "recovery"
+            if reconnect:
+                state.update(reconnect_acknowledged=self.attention_key("reconnect_required", screen),
+                             acknowledged=self.attention_key("worker_error", screen))
             self.dispatch(state, session, instruction + "\n\n" + state["submission"])
-            state.update(observation=None, acknowledged=None)
             self.save(state)
-            return self.response(state, "recovering")
+            return self.response(state, "reconnecting" if reconnect else "recovering")
 
     def choose(self, *, observation: int, keys: list[str], reason: str) -> JsonObject:
         supported_keys = {"Up", "Down", "Left", "Right", "Tab", "Enter", "Escape", "Space", "y", "n", *"0123456789"}
@@ -414,6 +475,8 @@ class Supervisor:
             self.check_observation(state, observation)
             session = self.attached()
             screen = self.current_screen(session)
+            if self.adapter.reconnection_status(screen) == "reconnecting":
+                raise SupervisionError("worker is reconnecting; keep watching until automatic retries finish")
             if fingerprint(screen) != state["observation"]["screen_hash"]:
                 raise SupervisionError("menu changed; watch again before choosing")
             pending = not self.adapter.is_menu(screen) and self.adapter.has_pending_submission(screen, session.activity_status())
@@ -424,7 +487,9 @@ class Supervisor:
             signature = self.attention_key("input_required", screen)
             count = state["choices"].get(signature, 0)
             confirms = any(key in {"Enter", "y", "n", *"0123456789"} for key in keys)
-            if confirms and (pending or count or self.adapter.error_hint.search(screen)):
+            reconnect_submission = (pending and state["phase"] == "submitting"
+                                    and state.get("submission_kind") == "reconnect")
+            if confirms and not reconnect_submission and (pending or count or self.adapter.error_hint.search(screen)):
                 self.charge(state)
             if confirms:
                 state["choices"][signature] = count + 1

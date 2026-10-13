@@ -73,6 +73,9 @@ class AgentAdapter:
     def submission_status(self, screen: str, activity_status: str) -> str:
         return "unknown"
 
+    def reconnection_status(self, screen: str) -> str | None:
+        return None
+
 
 def _emit(value: object) -> None:
     json.dump(value, sys.stdout, ensure_ascii=False)
@@ -126,7 +129,10 @@ def build_parser(adapter: AgentAdapter) -> argparse.ArgumentParser:
         command.add_argument("--token", required=True)
     commands.choices["run"].add_argument("--binary")
 
-    for name in ("watch", "recover", "choose", "stop"):
+    controls = ["watch", "recover", "choose", "stop"]
+    if adapter.kind == "codex":
+        controls.append("reconnect")
+    for name in controls:
         command = commands.add_parser(name)
         command.add_argument("--request", type=Path, required=True)
         command.add_argument("--session", required=True)
@@ -138,6 +144,10 @@ def build_parser(adapter: AgentAdapter) -> argparse.ArgumentParser:
     recover.add_argument("--reason", required=True)
     recover.add_argument("--instruction-file", type=Path)
     recover.add_argument("--interrupt", action="store_true")
+    if "reconnect" in commands.choices:
+        reconnect = commands.choices["reconnect"]
+        reconnect.add_argument("--observation", type=int, required=True)
+        reconnect.add_argument("--reason", required=True)
     choose = commands.choices["choose"]
     choose.add_argument("--observation", type=int, required=True)
     choose.add_argument("--reason", required=True)
@@ -185,7 +195,7 @@ def main(adapter: AgentAdapter, argv: Sequence[str] | None = None) -> int:
                 "result_file": str(worker_result_path(args.receipt).resolve()),
             })
             return 0
-        if args.command in {"run", "send", "watch", "recover", "choose", "stop"}:
+        if args.command in {"run", "send", "watch", "recover", "reconnect", "choose", "stop"}:
             supervisor = Supervisor(args.request, adapter, args.session)
             if args.command in {"run", "send"}:
                 value = supervisor.start(
@@ -200,6 +210,8 @@ def main(adapter: AgentAdapter, argv: Sequence[str] | None = None) -> int:
             elif args.command == "recover":
                 value = supervisor.recover(observation=args.observation, reason=args.reason,
                                            instruction_file=args.instruction_file, interrupt=args.interrupt)
+            elif args.command == "reconnect":
+                value = supervisor.reconnect(observation=args.observation, reason=args.reason)
             elif args.command == "choose":
                 value = supervisor.choose(observation=args.observation, keys=args.keys, reason=args.reason)
             else:

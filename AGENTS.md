@@ -40,7 +40,7 @@
 10. tmux 文本通过 buffer/paste 传递，不能把自然语言直接拼入 shell 命令。
 11. `project/` 是用户目录，除非用户明确要求，不修改、不删除、不提交。
 12. 默认活动静默阈值 300 秒；任何 worker 输出/变化及 SDK 心跳计入活动。SDK 心跳可显式排除；持续心跳时静默检测不会触发，DSH 仍须检查周期返回的屏幕。
-13. 主动恢复和重复卡住的菜单共用全 run 最多 5 次预算，不随 watch 或业务返工清零；首次普通选择免费。失败和总超时停止 worker，保留证据。
+13. 主动恢复和重复卡住的菜单共用全 run 最多 5 次预算，不随 watch 或业务返工清零；首次普通选择免费。Codex 自动重连期间继续等待，重试耗尽后用 reconnect；重连及其提交补发单独计数，不消耗错误恢复预算，仍受总时限限制。失败和总超时停止 worker，保留证据。
 14. `timeout_seconds` 覆盖整个 run，清理预留 `min(cleanup_timeout_seconds, timeout_seconds * 0.1)`；阶段等待不得增加总预算。清理忽略调用方取消事件，保留首次执行错误。
 15. 每个 SDK run 使用私有 tmux socket 和资源启动身份，不能对默认 server 或裸 PID 执行恢复清理。只有 accepted + keep_session 可保留 worker；清理状态必须可核验。
 16. 同一 workspace 拒绝重叠 run。SDK 不改宿主信号处理器；CLI 在主线程临时处理 SIGINT/SIGTERM，清理后输出一个 JSON 并恢复处理器。

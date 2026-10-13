@@ -104,8 +104,9 @@ class TmuxTransportTests(unittest.TestCase):
                 session.close()
 
     def test_both_adapters_complete_menu_recovery_receipt_flow_in_real_tmux(self) -> None:
-        for adapter in (CLAUDE, CODEX):
-            with self.subTest(agent=adapter.kind), tempfile.TemporaryDirectory() as directory:
+        for adapter, reconnect_retries in ((CLAUDE, None), (CODEX, None), (CODEX, 3), (CODEX, 12)):
+            reconnect = reconnect_retries is not None
+            with self.subTest(agent=adapter.kind, reconnect_retries=reconnect_retries), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 run = RunState.create(state_root=root / 'state', workspace=root, prompt='test',
                                       available_agents=set(AgentKind), max_attempts=1,
@@ -136,7 +137,9 @@ class TmuxTransportTests(unittest.TestCase):
                                              token=attempt.token, submission=payload,
                                              command=[sys.executable, str(script), adapter.cursor_glyphs[0],
                                                       str(attempt.receipt_file.parent), attempt.token,
-                                                      *(['--swallow-enter'] if adapter.kind == 'codex' else [])])
+                                                      *(['--swallow-enter'] if adapter.kind == 'codex' else []),
+                                                      *(['--reconnect', '--reconnect-retries', str(reconnect_retries)]
+                                                        if reconnect else [])])
                     self.assertEqual(start['status'], 'starting')
                     menu = wait_for('input_required')
                     supervisor.choose(observation=menu['id'], keys=['Enter'], reason='继续启动')
@@ -146,11 +149,24 @@ class TmuxTransportTests(unittest.TestCase):
                         self.assertFalse((attempt.receipt_file.parent / 'received-1.txt').exists())
                         self.assertEqual((attempt.receipt_file.parent / 'draft-1.txt').read_text(), payload)
                         supervisor.choose(observation=pending['id'], keys=['Enter'], reason='补发未提交的任务')
-                    failure = wait_for('worker_error')
+                    if reconnect:
+                        waiting = wait_for('reconnecting')
+                        self.assertEqual((waiting['recoveries'], waiting['reconnects']), (1, 0))
+                        (attempt.receipt_file.parent / 'finish-reconnect').touch()
+                    failure = wait_for('reconnect_required' if reconnect else 'worker_error')
                     self.assertEqual((attempt.receipt_file.parent / 'received-1.txt').read_text().rstrip(), payload)
-                    supervisor.recover(observation=failure['id'], reason='网络恢复后继续')
+                    if reconnect:
+                        output = io.StringIO()
+                        with redirect_stdout(output):
+                            self.assertEqual(main(adapter, ['reconnect', '--request', str(run.request_file),
+                                                           '--session', selected.session, '--observation', str(failure['id']),
+                                                           '--reason', '自动重试耗尽后重连']), 0)
+                        self.assertEqual(json.loads(output.getvalue())['status'], 'reconnecting')
+                    else:
+                        supervisor.recover(observation=failure['id'], reason='网络恢复后继续')
                     finished = wait_for('receipt_ready')
-                    self.assertEqual(finished['recoveries'], 2 if adapter.kind == 'codex' else 1)
+                    self.assertEqual(finished['recoveries'], 2 if adapter.kind == 'codex' and not reconnect else 1)
+                    self.assertEqual(finished['reconnects'], int(reconnect))
                     self.assertTrue((attempt.receipt_file.parent / 'received-2.txt').read_text().endswith(payload))
                     self.assertEqual(attempt.result_file.read_text(), 'Complete UTF-8 report')
                     self.assertEqual(supervisor.stop(reason='test completed')['status'], 'stopped')

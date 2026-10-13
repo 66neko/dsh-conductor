@@ -83,6 +83,9 @@ SDK 心跳默认也计入（即使关闭回调或屏幕日志），持续心跳�
 watch 返回的屏幕；菜单、错误提示、无效回执、worker 退出或采集失效可提前触发 needs_attention。
 
 recover 发送继续指令和原任务交接协议；choose 发送 DSH 根据当前菜单选择的按键。
+Codex 自动重连时 watch 返回 reconnecting，等待自动重试结束；重试耗尽且未恢复时返回
+reconnect_required，再用 reconnect 发送继续指令。重连及其提交补发单独计数为 reconnects，
+不消耗错误恢复预算，仍受全 run 截止时间和取消约束。
 所有动作核对本 run 的 agent/session/workspace 与最新 observation；恢复前再次检查 receipt，
 已有合法交接则拒绝再发指令。无效回执归档后由 worker 重写，管理者不得代签。
 监督操作通过文件锁互斥，watch 在睡眠时释放锁。恢复预算在副作用前持久化，整个 run 最多 5 次，
