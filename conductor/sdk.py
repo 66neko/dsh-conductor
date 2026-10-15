@@ -152,6 +152,7 @@ class TaskResult:
             "schema_version": 1,
             "run_id": self.run_id,
             "status": self.verdict.status,
+            "accepted": self.accepted,
             "workspace": str(self.workspace),
             "state_directory": str(self.state_directory),
             "session": self.session,
