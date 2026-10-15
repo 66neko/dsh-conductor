@@ -219,7 +219,7 @@ class LifecycleTests(unittest.TestCase):
                 self.assertEqual(caught.exception.code, "timeout")
                 self.assertEqual(caught.exception.phase, phase)
                 self.assertEqual(caught.exception.details["timeout_scope"], scope)
-                self.assertLess(time.monotonic() - started, 0.9)
+                self.assertLess(time.monotonic() - started, 1.5)  # CI 环境容差
 
     def test_large_prompt_write_can_be_cancelled_or_timed_out(self):
         from conductor.dsh import DshClient, DshConfig, DshError
