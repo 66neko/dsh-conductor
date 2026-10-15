@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.6.2] - 2026-10-15
+
+### Fixed
+
+- Add explicit `accepted` boolean field to `TaskResult.to_json()` output for improved CLI JSON consumer ergonomics
+- CLI JSON output now includes both `"status": "accepted"` and `"accepted": true` fields
+- Eliminates need for downstream consumers to manually check `result["status"] == "accepted"`
+
+### Validation
+
+- All 146 unit tests pass
+- Backward compatible: existing `status` field remains unchanged
+
+---
+
 ## [0.6.1] - 2026-10-13
 
 ### Fixed
