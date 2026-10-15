@@ -132,7 +132,7 @@ def build_prompt(
     report_mode = ""
     if include_report:
         report_mode = """
-**报告模式：** 本次 include_report=true。每轮任务文件要求 worker 将完整回答、结论、检查结果写入 result.md。
+**报告模式：** 本次 include_report=true。每轮任务文件要求 worker 按结论、修改文件、检查、未完成事项写精炼的 result.md，长内容另存文件并引用路径。
 SDK 将合并各轮报告与验收结论。你仍须按协议独立验收，在 verdict.checks 完整记录每项检查；
 verdict.summary 用一两句话概括最终结论。"""
 
@@ -164,8 +164,8 @@ attempts=0，每个验收项标记失败并说明环境证据。
 ## 2. 委派与监督
 
 根据 plan 选定的 agent 加载对应 skill。把任务摘要、步骤、上下文和预期结果写入首轮 task 文件，
-执行下方精确 run 命令。任务文件要求 worker 把完整回答、结论、检查结果写入 result.md；
-重要内容及时落盘，长输出另存文件并在 result.md 中给出路径。worker 必须在 result.md 原子
+执行下方精确 run 命令。任务文件要求 worker 把结论、修改文件、检查结果和未完成事项精炼写入 result.md；
+不要求复述过程或粘贴完整输出，长输出另存文件并在 result.md 中给出路径；返工轮只写本轮变化。worker 必须在 result.md 原子
 落盘后才写 receipt。
 
 run/send 只登记任务并立即返回，不代表完成。随后持续调用 watch，每次最多等待 300 秒且不超过

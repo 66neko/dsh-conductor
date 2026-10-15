@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.6.3] - 2026-10-15
+
+### Changed
+
+- Worker handoff prompt now asks for a concise `result.md` with four sections: conclusion, modified files, one-line checks, and remaining issues or blockers.
+- `result.md` should stay within about 60 lines, must not restate the task file or work process, and retry attempts only describe changes made in that attempt.
+- Full logs, command output, long answers, and long code are saved as separate files in the attempt directory and referenced by path from `result.md`.
+- DSH contract and both skill `SKILL.md` files use the same concise reporting requirement, which keeps `include_report` output much shorter.
+
+### Validation
+
+- All unit tests pass
+- Live Claude Code runs produced 15-line and 23-line `result.md` files following the new structure
+
+---
+
 ## [0.6.2] - 2026-10-15
 
 ### Fixed
