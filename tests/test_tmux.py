@@ -116,8 +116,7 @@ class TmuxTransportTests(unittest.TestCase):
                 attempt.task_file.write_text('task')
                 atomic_write_json(run.plan_file, {
                     'schema_version': 1, 'run_id': run.run_id, 'agent': adapter.kind, 'agent_reason': 'test',
-                    'task_summary': 'test', 'implementation_steps': ['test'],
-                    'acceptance_criteria': [{'id': 'test', 'description': 'test'}],
+                    'task_summary': 'test',
                 })
                 script = Path(__file__).parent / 'fixtures' / 'worker_tui.py'
                 payload = '<dsh_conductor_handoff>\n中文任务 literal $HOME $(date)\n</dsh_conductor_handoff>'

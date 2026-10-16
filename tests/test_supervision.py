@@ -28,8 +28,7 @@ class SupervisionTests(unittest.TestCase):
         self.agent = self.run.agent_state(AgentKind.CODEX)
         atomic_write_json(self.run.plan_file, {
             'schema_version': 1, 'run_id': self.run.run_id, 'agent': 'codex', 'agent_reason': 'test',
-            'task_summary': 'test', 'implementation_steps': ['test'],
-            'acceptance_criteria': [{'id': 'test', 'description': 'test'}],
+            'task_summary': 'test',
         })
         self.session = mock.Mock(name='session')
         self.session.name = self.agent.session

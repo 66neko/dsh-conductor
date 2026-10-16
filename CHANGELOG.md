@@ -2,6 +2,53 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.7.0] - 2026-10-16
+
+### ⚠️ Breaking changes
+
+This release changes acceptance semantics and removes fields from `plan` and `verdict`.
+Read the full upgrade guide before upgrading: [docs/upgrade-0.7.md](https://github.com/66neko/dsh-conductor/blob/v0.7.0/docs/upgrade-0.7.md).
+
+- **Acceptance semantics.** DSH no longer inspects the workspace or runs commands. It only reads the worker's `result.md` and decides whether the report covers every goal in the caller prompt. `accepted` now means "the final `result.md` reports all prompt goals as done", not "DSH independently verified the workspace". Callers that deploy, publish or merge on `accepted` must check artifacts themselves.
+- **`plan` fields removed:** `implementation_steps`, `acceptance_criteria`. Remaining: `schema_version` (still 1), `run_id`, `agent`, `agent_reason`, `task_summary`. Extra fields in old plan files are ignored.
+- **`verdict` schema 2 → 3; fields removed:** `checks`, `artifacts`. Remaining: `schema_version`, `run_id`, `status`, `agent`, `attempts`, `summary`, `remaining_issues`. v2 verdict files are rejected.
+- **SDK no longer checks** that verdict artifacts exist, that every acceptance criterion is covered, or that all checks passed.
+- **Internal API (`conductor.models`):** `AcceptanceCriterion` and `VerificationCheck` removed; `ExecutionPlan(...)` and `Verdict(...)` constructor arguments changed; `Verdict.load()` drops `max_attempts` and `workspace` and gains optional `registered_attempts`.
+- **`conductor validate-verdict`** now renames a valid `--verdict` temporary file to the final `verdict.json`, and its output adds `verdict_file`.
+
+### Changed
+
+- DSH writes only `status`, `summary` and `remaining_issues`. The SDK fills `run_id` and `agent` from the plan, and derives `attempts` from `supervision.json` and on-disk receipts (the larger of the two).
+- `accepted` still requires a valid token-bound receipt for the final attempt, a non-empty UTF-8 `result.md`, and `ready_for_verification` receipt status; `rejected` still requires at least one remaining issue.
+- The final rename to `verdict.json` is done by `validate-verdict`, so a run no longer fails because DSH validated the verdict but forgot to rename it.
+- DSH manager contract (`conductor/prompt.py`) is shorter: section 3 is report-only acceptance, section 4 marks the verdict as mandatory with a three-field schema. Task files ask workers to state how each prompt goal was completed in `result.md`.
+- Both skill `SKILL.md` files, README, AGENTS.md and `docs/` (architecture, lifecycle, result-json, full-report) updated for the new flow.
+
+### Added
+
+- `docs/upgrade-0.7.md`: complete upgrade guide with grep checklist, before/after code, unchanged surface and rollback steps.
+- `conductor.models.registered_attempts()` and `conductor.models.VERDICT_SCHEMA_VERSION`.
+- CLI test covering `validate-verdict` rename only on a valid verdict.
+
+### Unchanged
+
+- `Conductor`, `ConductorConfig` (all fields and defaults), `run(prompt, on_event, *, cancel_event)`, `TaskResult` and top-level JSON (`schema_version` 1, `status`, `accepted`), `ConductorError` codes/phases, `RunEvent`, CLI `run` arguments, stdout JSON and exit codes, receipt schema 1, `include_report` format, tmux isolation, recovery budget, cleanup and cancellation.
+
+### Upgrade recommendations
+
+1. Make sure no run is in progress; finished run directories stay usable with `cleanup_run`.
+2. Search caller code for `acceptance_criteria`, `implementation_steps`, `checks`, `artifacts`, `criterion`, `schema_version`, `Verdict.load`, `ExecutionPlan.load` and migrate hits as shown in the guide.
+3. Add your own artifact checks wherever `accepted` triggers automated deployment or publishing.
+4. Ask workers in your prompt to list every goal and its completion status in `result.md`.
+5. Upgrade with `pip install --upgrade "dsh-conductor==0.7.0"`, run `python3.13 -m conductor doctor`, then a small task. Roll back with `pip install "dsh-conductor<0.7"`.
+
+### Validation
+
+- All 148 unit tests pass; `compileall` clean.
+- Live DSH 0.1.6-alpha.2 + Claude Code run: 1 attempt, accepted in 75 s, verdict validated and renamed on the first try; DSH used about 5 s from receipt to final verdict.
+
+---
+
 ## [0.6.3] - 2026-10-15
 
 ### Changed

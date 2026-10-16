@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest import mock
 
 from conductor import ConductorError, TaskResult
-from conductor.models import AcceptanceCriterion, AgentKind, ExecutionPlan, Verdict, VerificationCheck
+from conductor.models import AgentKind, ExecutionPlan, Verdict
 from conductor.sdk import DshRunSummary
 from conductor.tmux import DEFAULT_CAPTURE_HISTORY_LINES, HISTORY_LIMIT, TmuxSession
 from examples import quickstart
@@ -20,19 +20,16 @@ def make_result(workspace: Path, *, report: str | None = None) -> TaskResult:
     (workspace / "hello.py").write_text("print('Hello, DSH!')\n", encoding="utf-8")
     worker_result = workspace / "result.md"
     worker_result.write_text("已创建 hello.py 并检查输出。\nEND-OF-RESULT\n", encoding="utf-8")
-    criterion = AcceptanceCriterion("output", "hello.py 的输出、退出码及 stderr 符合要求")
     return TaskResult(
         run_id="quickstart-test", workspace=workspace, state_directory=workspace / "run",
         session="quickstart-test", worker_result=worker_result, report=report,
         plan=ExecutionPlan(
             schema_version=1, run_id="quickstart-test", agent=AgentKind.CLAUDE,
-            agent_reason="测试指定", task_summary="创建 hello.py", implementation_steps=("创建脚本",),
-            acceptance_criteria=(criterion,),
+            agent_reason="测试指定", task_summary="创建 hello.py",
         ),
         verdict=Verdict(
-            schema_version=2, run_id="quickstart-test", status="accepted", agent=AgentKind.CLAUDE,
-            attempts=1, artifacts=("hello.py",), summary="脚本通过独立检查", remaining_issues=(),
-            checks=(VerificationCheck(criterion.id, criterion.description, "运行脚本", "输出符合要求", True),),
+            schema_version=3, run_id="quickstart-test", status="accepted", agent=AgentKind.CLAUDE,
+            attempts=1, summary="报告覆盖全部目标", remaining_issues=(),
         ),
         dsh=DshRunSummary(status="idle", elapsed_seconds=1.0, event_count=1, final_text="已完成"),
     )

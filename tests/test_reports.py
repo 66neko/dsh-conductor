@@ -11,7 +11,7 @@ from unittest import mock
 
 from conductor.errors import OperationError
 from conductor.lifecycle import Budget
-from conductor.models import AcceptanceCriterion, AgentKind, ExecutionPlan, Verdict, VerificationCheck, WorkerReceipt
+from conductor.models import AgentKind, ExecutionPlan, Verdict, WorkerReceipt
 from conductor.reports import build_report
 from conductor.state import RunState, atomic_write_json
 
@@ -24,12 +24,9 @@ class ReportTests(unittest.TestCase):
         self.state = RunState.create(state_root=self.root / "state", workspace=self.root, prompt="报告任务",
                                      available_agents=set(AgentKind), max_attempts=3,
                                      worker_idle_timeout_seconds=300, keep_session=False, include_report=True)
-        self.plan = ExecutionPlan(1, self.state.run_id, AgentKind.CODEX, "指定", "实现并测试中文功能",
-                                  ("实现", "测试"), (AcceptanceCriterion("test", "检查通过"),))
+        self.plan = ExecutionPlan(1, self.state.run_id, AgentKind.CODEX, "指定", "实现并测试中文功能")
         atomic_write_json(self.state.plan_file, self.plan.to_json())
-        self.verdict = Verdict(2, self.state.run_id, "accepted", AgentKind.CODEX, 2, ("output.txt",),
-                               (VerificationCheck("test", "检查通过", "python -m unittest", "独立执行通过", True),),
-                               "全部验收通过", ())
+        self.verdict = Verdict(3, self.state.run_id, "accepted", AgentKind.CODEX, 2, "全部验收通过", ())
         self.selected = self.state.agent_state(AgentKind.CODEX)
         self.budget = Budget(float("inf"))
         for attempt in self.selected.attempts[:2]:

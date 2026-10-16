@@ -26,9 +26,38 @@ class CliTests(unittest.TestCase):
             self.assertIn("完整检查结果", payload["report"])
             self.assertIn("## 验收结果", payload["report"])
             self.assertIn("**✓ 通过**", payload["report"])
-            self.assertNotIn("test fixture", payload["report"])
-            self.assertEqual(payload["verdict"]["checks"][0]["method"], "test fixture")
+            self.assertEqual(payload["verdict"]["attempts"], 1)
+            self.assertNotIn("checks", payload["verdict"])
             self.assertEqual(payload["schema_version"], 1)
+
+    def test_validate_verdict_renames_only_valid_temporary_file(self) -> None:
+        from conductor.models import AgentKind
+        from conductor.state import RunState, atomic_write_json
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = RunState.create(state_root=root / "state", workspace=root, prompt="t",
+                                    available_agents=set(AgentKind), max_attempts=1,
+                                    worker_idle_timeout_seconds=300, keep_session=False)
+            atomic_write_json(state.plan_file, {"schema_version": 1, "run_id": state.run_id, "agent": "codex",
+                                                "agent_reason": "r", "task_summary": "s"})
+            temporary = Path(f"{state.verdict_file}.tmp")
+            temporary.write_text(json.dumps({"schema_version": 3, "status": "rejected", "summary": "未完成",
+                                             "remaining_issues": []}), encoding="utf-8")
+            args = ["validate-verdict", "--request", str(state.request_file), "--verdict", str(temporary)]
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(main(args), 1)
+            self.assertEqual(json.loads(output.getvalue())["status"], "invalid")
+            self.assertTrue(temporary.exists())
+            self.assertFalse(state.verdict_file.exists())
+            temporary.write_text(json.dumps({"schema_version": 3, "status": "rejected", "summary": "未完成",
+                                             "remaining_issues": ["缺少说明"]}), encoding="utf-8")
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(main(args), 0)
+            self.assertEqual(json.loads(output.getvalue())["status"], "valid")
+            self.assertFalse(temporary.exists())
+            self.assertTrue(state.verdict_file.exists())
 
     def test_install_skills_targets_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

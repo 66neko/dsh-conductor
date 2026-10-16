@@ -11,7 +11,7 @@ Conductor SDK ── JSON-RPC/stdio ──► DSH manager
    │                                  ├─ 读取 user-prompt.md
    │                                  ├─ 生成 plan.json，选择一个 agent
    │                                  ├─ 通过对应 skill 启动 tmux worker
-   │                                  ├─ 读取 receipt 并独立检查工作区
+   │                                  ├─ 读取 receipt 与 result.md 做报告验收
    │                                  └─ 生成 verdict.json
    ◄────────────── TaskResult + RunEvent ┘
 ```
@@ -36,7 +36,7 @@ request.json          # 运行身份、两个候选 agent 和所有事实路径
 user-prompt.md        # 调用方原始 prompt
 manager-prompt.md     # 发给 DSH 的完整中文编排契约
 plan.json             # DSH 选择的 agent、步骤和验收项
-verdict.json          # DSH 独立验收结论
+verdict.json          # DSH 基于 result.md 的验收结论（schema v3）
 worker-screen.log     # tmux 屏幕变化
 supervision.json      # 活动时间、恢复预算、轮次、最新 observation
 supervision.jsonl     # DSH 观察、选择、恢复、停止的审计记录
@@ -55,7 +55,7 @@ attempts/<agent>/<n>/
 每轮 `result_file` 固定为 receipt 同目录的 `result.md`，在 request 中预先公开给 DSH。
 worker 必须先将完整结果原子落盘再写回执，包括 blocked 时的原因及已完成工作；`complete`、
 receipt 加载和 accepted verdict 校验都会检查结果文件非空且为 UTF-8。DSH 收到合法回执后
-完整读取结果及相关引用文件，并独立验证产物；结果文件出现本身不是完成信号。
+完整读取 result.md，只判断报告是否完成 prompt 全部目标，不复核工作区；结果文件出现本身不是完成信号。
 状态目录默认位于工作区的 `.dsh-conductor/` 下；调用方可通过配置指定其他位置。
 
 ## 完成与验收事实
@@ -66,9 +66,9 @@ receipt 加载和 accepted verdict 校验都会检查结果文件非空且为 UT
 |---|---|
 | token 匹配的 worker receipt | 本轮 worker 已交还控制权 |
 | DSH `turn/end.reason.kind` 与 `session.status=idle` | 管理回合在协议层结束 |
-| 通过 schema 校验的 `verdict.json` 且 status 为 accepted | DSH 已独立验证全部计划验收项 |
+| 通过 schema 校验的 `verdict.json` 且 status 为 accepted | DSH 判定 result.md 完成了 prompt 全部目标 |
 
-屏幕稳定、worker 自述、DSH 最后一条自然语言消息和产物偶然出现都不能替代这些事实。accepted verdict 还必须绑定选定 agent 的每一轮 receipt、覆盖全部 criterion id、只引用工作区内相对路径，并确保产物真实存在。第 `attempts` 轮回执必须是 ready_for_verification，blocked 回执不能支撑 accepted。DSH 在 rename verdict 前运行 `conductor validate-verdict` 自检，该命令复用 SDK 最终校验；SDK 在回合结束后仍独立重新校验。
+屏幕稳定、worker 自述、DSH 最后一条自然语言消息和产物偶然出现都不能替代这些事实。DSH 只写 status、summary、remaining_issues；run id、agent 和 attempts 由 SDK 从 plan、supervision.json 与已落盘 receipt 推导。accepted 要求第 `attempts` 轮回执有效且为 ready_for_verification，blocked 回执不能支撑 accepted。DSH 写 `verdict.json.tmp` 后运行 `conductor validate-verdict`，校验通过即由该命令 rename；SDK 在回合结束后用同一规则重新校验。
 
 ## 监督与恢复
 

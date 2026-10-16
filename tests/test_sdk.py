@@ -26,16 +26,10 @@ class SdkTests(unittest.TestCase):
                 self.assertIn("## 验收结果", payload["report"])
                 self.assertIn("**✓ 通过**", payload["report"])
                 self.assertIn("fixture accepted", payload["report"])
-                self.assertNotIn("criterion-1", payload["report"])
-                self.assertNotIn("test fixture", payload["report"])
-                self.assertNotIn("fixture.txt exists", payload["report"])
-                self.assertNotIn("### 产物", payload["report"])
-                self.assertEqual(payload["verdict"]["schema_version"], 2)
-                self.assertEqual(payload["verdict"]["checks"], [{
-                    "criterion_id": "criterion-1", "criterion": "fixture.txt exists",
-                    "method": "test fixture", "evidence": "fixture.txt exists", "passed": True,
-                }])
-                self.assertEqual(payload["verdict"]["artifacts"], ["fixture.txt"])
+                self.assertEqual(payload["verdict"], {
+                    "schema_version": 3, "run_id": result.run_id, "status": "accepted", "agent": agent,
+                    "attempts": 1, "summary": "fixture accepted", "remaining_issues": [],
+                })
                 self.assertEqual(payload["dsh"]["final_text"], "fixture complete")
                 self.assertEqual(payload["worker_result"], str(result.worker_result))
                 self.assertEqual(Path(payload["report_file"]).read_text(encoding="utf-8"), result.report)

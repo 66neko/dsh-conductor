@@ -57,55 +57,22 @@ python3.13 -m conductor run \
     "run_id": "20260914T071530.123456Z-a1b2c3d4e5f6",
     "agent": "codex",
     "agent_reason": "用户在 prompt 中明确要求使用 Codex",
-    "task_summary": "创建内容符合要求的 hello.txt",
-    "implementation_steps": [
-      "在工作区根目录创建 hello.txt",
-      "检查文件内容和末尾换行"
-    ],
-    "acceptance_criteria": [
-      {
-        "id": "file-exists",
-        "description": "hello.txt 存在"
-      },
-      {
-        "id": "exact-content",
-        "description": "文件字节内容恰好为 Hello Conductor 加一个换行"
-      }
-    ]
+    "task_summary": "创建内容符合要求的 hello.txt"
   },
   "verdict": {
-    "schema_version": 2,
+    "schema_version": 3,
     "run_id": "20260914T071530.123456Z-a1b2c3d4e5f6",
     "status": "accepted",
     "agent": "codex",
     "attempts": 1,
-    "artifacts": [
-      "hello.txt"
-    ],
-    "checks": [
-      {
-        "criterion_id": "file-exists",
-        "criterion": "hello.txt 存在",
-        "method": "使用 test -f hello.txt 检查文件",
-        "evidence": "命令退出码为 0",
-        "passed": true
-      },
-      {
-        "criterion_id": "exact-content",
-        "criterion": "文件字节内容恰好为 Hello Conductor 加一个换行",
-        "method": "使用 Python 读取文件并比较 bytes",
-        "evidence": "读取结果为 b'Hello Conductor\\n'",
-        "passed": true
-      }
-    ],
-    "summary": "全部验收标准均已通过",
+    "summary": "result.md 说明已创建 hello.txt 且内容符合要求，覆盖 prompt 全部目标",
     "remaining_issues": []
   },
   "dsh": {
     "status": "completed",
     "elapsed_seconds": 42.731,
     "event_count": 19,
-    "final_text": "任务已执行并完成独立验收。"
+    "final_text": "任务已执行并完成报告验收。"
   },
   "worker_log": "/home/user/projects/demo/.dsh-conductor/runs/20260914T071530.123456Z-a1b2c3d4e5f6/worker-screen.log"
 }
@@ -125,7 +92,7 @@ python3.13 -m conductor run \
 | `cleanup` | object | 是 | 必需资源的清理结果，见下文。 |
 | `session` | string | 是 | 被选中 worker 的 tmux 会话名，例如 `dsh-codex-a1b2c3d4e5f6`。会话可能已按运行配置关闭。 |
 | `plan` | object | 是 | DSH 在执行前产生的结构化任务计划，格式见 [`plan`](#plan-对象)。 |
-| `verdict` | object | 是 | DSH 独立验收后产生的结论，格式见 [`verdict`](#verdict-对象)。 |
+| `verdict` | object | 是 | DSH 基于 result.md 报告给出的验收结论，格式见 [`verdict`](#verdict-对象)。 |
 | `dsh` | object | 是 | 本次 DSH 管理回合的协议摘要，格式见 [`dsh`](#dsh-对象)。 |
 | `worker_log` | string | 否 | `worker-screen.log` 的绝对路径。关闭采集或没有产生日志文件时字段会被省略，不会返回 `null`。 |
 | `worker_result` | string | 否 | 所选 agent 最后一轮 `result.md` 的绝对路径。未提交 worker 或本轮未生成文件时省略；报告须结合 verdict 判断，文件存在不代表通过验收。 |
@@ -136,8 +103,7 @@ python3.13 -m conductor run \
 SDK 和 CLI 的完整报告默认关闭，SDK 使用 `ConductorConfig(include_report=True)`，CLI 使用
 `--include-report`。quickstart 示例默认开启，支持 `--no-include-report` 关闭。
 完整正文直接位于 JSON 的 report 字符串中；worker_result 和 dsh.final_text 的原有含义不变。
-报告末尾只展示最终状态、summary 与必要的 remaining_issues；详细 checks 和 artifacts 仍在
-结构化 verdict 中，独立验收规则、SDK 字段、JSON 协议和 schema 版本均不变。
+报告末尾只展示最终状态、summary 与必要的 remaining_issues。
 report 是返回前生成的固定快照，序列化不再读取文件。格式及内部子任务清单见[完整报告指南](full-report.md)。
 开启后，已有运行目录的 ConductorError 也尽力提供上述三个字段；未形成可信 verdict 时不能因
 磁盘上存在 verdict.json 就宣告验收通过。清理失败时 exc.result 中已有的可信报告继续保留。
@@ -148,7 +114,8 @@ report 是返回前生成的固定快照，序列化不再读取文件。格式�
 
 ## `plan` 对象
 
-`plan` 记录 DSH 对原始 prompt 的拆解结果和 agent 选择。它在 worker 开始任务前生成。
+`plan` 记录 DSH 的 agent 选择和任务摘要，在 worker 开始任务前生成。验收目标直接取自用户 prompt，
+plan 不再拆分步骤和验收项（旧 plan 中多余的字段会被忽略）。
 
 | 字段 | JSON 类型 | 约束与含义 |
 |---|---|---|
@@ -157,43 +124,30 @@ report 是返回前生成的固定快照，序列化不再读取文件。格式�
 | `agent` | string | 只能是 `claude` 或 `codex`。选择必须遵从 prompt 中明确指定的 agent；未指定时由 DSH 在可用 agent 中选择。 |
 | `agent_reason` | string | DSH 选择该 agent 的非空理由。 |
 | `task_summary` | string | DSH 对本次任务的非空摘要。 |
-| `implementation_steps` | array[string] | 非空执行步骤数组，每一项都是非空字符串。 |
-| `acceptance_criteria` | array[object] | 非空验收标准数组。最终 `verdict.checks` 必须逐项覆盖这里的所有 ID。 |
-
-每个 `acceptance_criteria` 元素包含：
-
-| 字段 | JSON 类型 | 约束与含义 |
-|---|---|---|
-| `id` | string | 本轮计划内唯一的验收项 ID。长度为 1 到 64 个字符，首字符必须是字母或数字，其余字符可使用字母、数字、下划线和连字符。 |
-| `description` | string | 可独立验证的非空验收要求。 |
 
 ## `verdict` 对象
 
-`verdict` 是 DSH 在 worker 交回控制权后，直接检查工作区得到的独立验收记录。
+本项目的验收只分析 worker 的 `result.md` 是否完成用户 prompt 的全部目标，不复核工作区、
+不运行命令。DSH 写入的 verdict 文件只需三个业务字段：
+
+```json
+{"schema_version": 3, "status": "accepted", "summary": "一两句话结论", "remaining_issues": []}
+```
+
+`validate-verdict` 校验通过后自动把 `verdict.json.tmp` rename 为 `verdict.json`。返回 JSON 中的
+verdict 由 SDK 补全推导字段：
 
 | 字段 | JSON 类型 | 约束与含义 |
 |---|---|---|
-| `schema_version` | integer | 当前固定为 `2`。 |
-| `run_id` | string | 必须与顶层和 `plan.run_id` 完全一致。 |
+| `schema_version` | integer | 当前固定为 `3`。 |
+| `run_id` | string | SDK 填入，等于 `plan.run_id`。 |
 | `status` | string | `accepted` 或 `rejected`，并与顶层 `status` 相同。 |
-| `agent` | string | `claude` 或 `codex`，必须与 `plan.agent` 相同。 |
-| `attempts` | integer | 实际委派次数，范围为 `0` 到 `ConductorConfig.max_attempts`。`accepted` 至少需要一次委派。 |
-| `artifacts` | array[string] | 本次任务的产物路径。每项必须是工作区内的相对路径；`accepted` 时列出的产物必须真实存在。 |
-| `checks` | array[object] | 逐项验收记录。必须恰好覆盖 `plan.acceptance_criteria` 的全部 ID，每个 ID 只出现一次。 |
-| `summary` | string | DSH 对最终验收结论的非空总结。 |
-| `remaining_issues` | array[string] | 未解决问题。`accepted` 时必须为空；`rejected` 时必须至少包含一项非空说明。 |
+| `agent` | string | SDK 填入，等于 `plan.agent`。 |
+| `attempts` | integer | SDK 推导：监督记录登记轮次与最后一个已落盘 receipt 轮次的较大者。 |
+| `summary` | string | DSH 对报告验收结论的非空总结。 |
+| `remaining_issues` | array[string] | 报告未完成的目标。`accepted` 时必须为空；`rejected` 时至少一项。 |
 
-每个 `checks` 元素包含：
-
-| 字段 | JSON 类型 | 约束与含义 |
-|---|---|---|
-| `criterion_id` | string | 对应 `plan.acceptance_criteria[].id`。 |
-| `criterion` | string | 本次检查所对应的验收要求。 |
-| `method` | string | DSH 实际使用的检查方法或命令说明。 |
-| `evidence` | string | 检查所得的非空事实证据。 |
-| `passed` | boolean | 该项是否通过。`accepted` 要求所有检查均为 `true`。 |
-
-除上述结构校验外，`accepted` 还要求选中 agent 的最后一次 token 回执状态为
+`accepted` 还要求第 `attempts` 轮 token 回执有效、`result.md` 非空，且回执状态为
 `ready_for_verification`。回执属于运行目录中的内部审计记录，不嵌入最终 JSON。
 
 ## `dsh` 对象
@@ -206,11 +160,11 @@ report 是返回前生成的固定快照，序列化不再读取文件。格式�
 | `final_text` | string | DSH 最后一段文本，仅供展示和审计。它不作为完成或验收依据。 |
 
 `dsh.status` 与顶层 `status` 表示不同概念：前者表示管理回合是否在协议层完成，后者表示
-任务产物是否通过独立验收。
+worker 报告是否通过验收。
 
 ## `accepted` 与 `rejected`
 
-`accepted` 表示全部验收项通过，并满足 run id、agent、回执和产物路径等一致性校验。
+`accepted` 表示 DSH 判定最后一轮 result.md 完成了 prompt 全部目标，且最后一轮回执有效。
 
 `rejected` 表示 DSH 已正常结束管理和验收流程，但任务没有满足全部要求。它仍然返回完整
 `TaskResult`，不会抛出 `ConductorError`。例如，拒绝结论中的关键字段可能是：
@@ -219,21 +173,11 @@ report 是返回前生成的固定快照，序列化不再读取文件。格式�
 {
   "status": "rejected",
   "verdict": {
-    "schema_version": 2,
+    "schema_version": 3,
     "run_id": "20260914T071530.123456Z-a1b2c3d4e5f6",
     "status": "rejected",
     "agent": "codex",
     "attempts": 2,
-    "artifacts": ["hello.txt"],
-    "checks": [
-      {
-        "criterion_id": "exact-content",
-        "criterion": "文件内容必须完全匹配",
-        "method": "比较文件 bytes",
-        "evidence": "实际内容缺少末尾换行",
-        "passed": false
-      }
-    ],
     "summary": "文件已创建，但内容未完全满足要求",
     "remaining_issues": [
       "hello.txt 缺少末尾换行"
@@ -394,7 +338,7 @@ if payload["schema_version"] != 1:
 
 match payload["status"]:
     case "accepted":
-        publish_artifacts(payload["verdict"]["artifacts"])
+        publish(payload["verdict"]["summary"])
     case "rejected":
         report_issues(payload["verdict"]["remaining_issues"])
     case other:

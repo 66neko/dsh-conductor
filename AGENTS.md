@@ -1,6 +1,6 @@
 # AGENTS.md — 项目说明
 
-`dsh-conductor` 是一个 Python 3.13 SDK：DSH 读取调用方 prompt，拆解任务与验收标准，选择 Claude Code 或 Codex，在 tmux 中监督 worker，独立验证工作区并写出最终 verdict。
+`dsh-conductor` 是一个 Python 3.13 SDK：DSH 读取调用方 prompt，选择 Claude Code 或 Codex，在 tmux 中监督 worker，只依据 worker 的 result.md 判断是否完成 prompt 目标并写出最终 verdict。
 
 ## 模块职责
 
@@ -14,7 +14,7 @@
 | `conductor/cli.py` | CLI 参数、stderr 事件渲染、JSON stdout、doctor/install/show/validate-verdict |
 | `conductor/dsh.py` | `dsh --profile sdk` JSON-RPC/stdio 客户端 |
 | `conductor/state.py` | 运行目录、候选 agent 会话、attempt 和 receipt 路径 |
-| `conductor/models.py` | plan、receipt、verdict 的 schema 与事实校验 |
+| `conductor/models.py` | plan（agent 与任务摘要）、receipt、verdict v3 的 schema 与回执绑定校验 |
 | `conductor/reports.py` | 可选完整报告快照、内部子任务清单与验收报告合并 |
 | `conductor/prompt.py` | 发给 DSH 的中文拆解、委派、监督和验收契约 |
 | `conductor/progress.py` | `RunEvent`、DSH 协议进度、心跳和 worker 日志事件 |
@@ -34,7 +34,7 @@
 4. CLI stdout 只有一个 JSON 对象；实时进度由 `RunEvent` 回调交给调用方，CLI 再写 stderr。
 5. DSH 是否完成只认 `turn/end.reason.kind` 与 `session.status == idle`。
 6. worker 成功交接只认绑定 token 的 receipt 和非空 UTF-8 result.md；屏幕可用于诊断、选择、恢复和失败判断，不能作为成功依据；失败无需回执。
-7. 验收只认 schema v2 verdict，并再次绑定 run id、plan agent、criterion id、receipt token 和工作区路径。
+7. 验收只分析 result.md 是否完成 prompt 目标，不复核工作区。verdict 为 schema v3，DSH 只写 status/summary/remaining_issues；run id、agent、轮次由 SDK 从 plan、监督记录和 receipt 推导，accepted 要求最后一轮 receipt 有效且为 ready_for_verification。`validate-verdict` 校验通过后自动 rename。
 8. `DSH_PERMISSION_MODE` 必须是 `danger-full-access`，由 DSH 客户端强制设置。
 9. 两个 skill 只有仓库中的源码；运行前直接覆盖到 `<workspace>/.dsh/skills`，不写入全局目录；修改 skill 时同步中文 `SKILL.md`。
 10. tmux 文本通过 buffer/paste 传递，不能把自然语言直接拼入 shell 命令。

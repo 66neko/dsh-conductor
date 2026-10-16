@@ -24,13 +24,13 @@ python3.13 <skill>/scripts/claude_session.py run \
 ```
 
 `run` 立即登记任务并返回 `starting`；随后必须 `watch`，由 watch 在输入界面就绪后提交任务。
-只有收到有效回执且独立验收后需要业务返工，才使用 `send`，参数与 run 相同，但取下一轮的文件和新 token。
+只有收到有效回执且报告验收不通过需要返工，才使用 `send`，参数与 run 相同，但取下一轮的文件和新 token。
 
 每轮 worker 必须将结论、修改文件、检查结果、未完成事项或阻塞信息精炼写入 receipt 同目录的
 非空 UTF-8 `result.md`，尽量控制在 60 行内，返工轮只写本轮变化。完整日志、长检查输出和长答案
 另存文件并在报告中引用路径。最终报告先写
 临时文件再原子替换，然后运行控制器提供的 `complete` 命令。终端只显示简短进度和路径。
-收到回执后，DSH 必须读完整报告及相关引用文件，再独立验收工作区。
+收到回执后，DSH 完整读取 result.md，只判断报告是否完成用户 prompt 的全部目标，不复核工作区。
 
 ## 有界观察与判断
 
@@ -47,7 +47,7 @@ sdk-stop.json 出现后不得继续派发、选择或恢复。同步调用，不
 | `starting` | 尚在启动或等待输入界面就绪，继续 watch |
 | `running` | 检查屏幕和 observation，任务继续则再次 watch |
 | `needs_attention` | 根据 reason、屏幕和 snapshot_file 决定观察、选择、恢复或结束 |
-| `receipt_ready` | 有效 token 回执与结果文件已就绪，读取文件并独立验收 |
+| `receipt_ready` | 有效 token 回执与结果文件已就绪，读取 result.md 并做报告验收 |
 | `stopped` | worker 已结束，记录失败证据并写 rejected verdict |
 
 默认连续 300 秒没有计入活动的变化才触发 `silent`。spinner、计时器、重复错误、终端输出字节、

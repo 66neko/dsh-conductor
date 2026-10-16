@@ -103,8 +103,6 @@ for line in sys.stdin:
                     "agent": selected["agent"],
                     "agent_reason": "fixture selection",
                     "task_summary": "fixture task",
-                    "implementation_steps": ["write fixture artifact"],
-                    "acceptance_criteria": [{"id": "criterion-1", "description": "fixture.txt exists"}],
                 }
                 Path(request_data["plan_file"]).write_text(json.dumps(plan), encoding="utf-8")
                 if os.environ.get("FAKE_DSH_WORKER"):
@@ -126,25 +124,13 @@ for line in sys.stdin:
                     child = subprocess.Popen([sys.executable, "-c", "import fcntl,sys,time; f=open(sys.argv[1], 'a'); fcntl.flock(f, fcntl.LOCK_EX); print('locked', flush=True); time.sleep(60)", str(request_path.parent / "supervision.lock")], stdout=sys.stderr)
                     time.sleep(0.1)
                 verdict = {
-                    "schema_version": 2,
-                    "run_id": request_data["run_id"],
+                    "schema_version": 3,
                     "status": "accepted",
-                    "agent": selected["agent"],
-                    "attempts": 1,
-                    "artifacts": ["fixture.txt"],
-                    "checks": [{
-                        "criterion_id": "criterion-1",
-                        "criterion": "fixture.txt exists",
-                        "method": "test fixture",
-                        "evidence": "fixture.txt exists",
-                        "passed": True,
-                    }],
                     "summary": "fixture accepted",
                     "remaining_issues": [],
                 }
                 if os.environ.get("FAKE_DSH_REJECTED"):
                     verdict.update(status="rejected", summary="fixture failed", remaining_issues=["worker unavailable"])
-                    verdict["checks"][0]["passed"] = False
                     Path(attempt["receipt_file"]).unlink()
                     Path(attempt["result_file"]).unlink(missing_ok=True)
                 Path(request_data["verdict_file"]).write_text(json.dumps(verdict), encoding="utf-8")

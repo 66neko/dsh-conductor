@@ -13,7 +13,7 @@ from .errors import ConductorError, OperationError
 from .lifecycle import RunContext, acquire_lock, positive_seconds
 from .runtime import CleanupReport, RunResources, cleanup_resources
 from .dsh import DshClient, DshConfig, RunResult
-from .models import ExecutionPlan, JsonObject, RecordError, Verdict
+from .models import ExecutionPlan, JsonObject, RecordError, Verdict, registered_attempts
 from .progress import EventCallback, ProgressReporter
 from .reports import build_report
 from .prompt import build_prompt
@@ -121,7 +121,7 @@ class DshRunSummary:
 
 @dataclass(frozen=True, slots=True)
 class TaskResult:
-    """DSH 计划、独立验收结论和本轮审计信息。"""
+    """DSH 计划、基于 result.md 的验收结论和本轮审计信息。"""
 
     run_id: str
     workspace: Path
@@ -277,8 +277,9 @@ class Conductor:
             plan = ExecutionPlan.load(state.plan_file, expected_run_id=state.run_id, budget=budget)
             selected = state.agent_state(plan.agent)
             validation_object = "verdict"
-            verdict = Verdict.load(state.verdict_file, plan=plan, max_attempts=config.max_attempts,
-                                   workspace=self.workspace, budget=budget,
+            registered = registered_attempts(state.root / "supervision.json", run_id=state.run_id,
+                                             agent=plan.agent, session=selected.session, budget=budget)
+            verdict = Verdict.load(state.verdict_file, plan=plan, budget=budget, registered_attempts=registered,
                                    expected_receipts=tuple((attempt.receipt_file, attempt.token) for attempt in selected.attempts))
             if verdict.status == "accepted" and plan.agent not in available_agents:
                 raise RecordError(f"accepted verdict selected unavailable agent {plan.agent.value!r}")

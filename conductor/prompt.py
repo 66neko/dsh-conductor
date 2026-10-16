@@ -7,7 +7,7 @@ import shlex
 from pathlib import Path
 from typing import Mapping, Set
 
-from .models import AgentKind
+from .models import VERDICT_SCHEMA_VERSION, AgentKind
 from .state import AgentState, RunState
 
 
@@ -88,25 +88,12 @@ def build_prompt(
         "agent": "codex",
         "agent_reason": "用户明确要求使用 Codex，且当前环境可用",
         "task_summary": "从用户 prompt 中提取的具体任务",
-        "implementation_steps": ["步骤一", "步骤二"],
-        "acceptance_criteria": [{"id": "criterion-1", "description": "可独立验证的验收项"}],
     }
 
     verdict_example = {
-        "schema_version": 2,
-        "run_id": state.run_id,
+        "schema_version": VERDICT_SCHEMA_VERSION,
         "status": "accepted",
-        "agent": "codex",
-        "attempts": 1,
-        "artifacts": ["relative/path"],
-        "checks": [{
-            "criterion_id": "criterion-1",
-            "criterion": "与 plan 中 criterion-1 对应的验收项",
-            "method": "DSH 亲自执行的命令或直接检查",
-            "evidence": "具体观察结果、输出或文件内容",
-            "passed": True,
-        }],
-        "summary": "DSH 对任务完成与验收结果的最终总结",
+        "summary": "result.md 已覆盖用户 prompt 的全部目标",
         "remaining_issues": [],
     }
 
@@ -132,11 +119,9 @@ def build_prompt(
     report_mode = ""
     if include_report:
         report_mode = """
-**报告模式：** 本次 include_report=true。每轮任务文件要求 worker 按结论、修改文件、检查、未完成事项写精炼的 result.md，长内容另存文件并引用路径。
-SDK 将合并各轮报告与验收结论。你仍须按协议独立验收，在 verdict.checks 完整记录每项检查；
-verdict.summary 用一两句话概括最终结论。"""
+**报告模式：** 本次 include_report=true。SDK 会合并各轮 result.md 与 verdict 结论；verdict.summary 用一两句话概括。"""
 
-    return f"""你是本次编码任务的管理者、拆解者和独立验收者。
+    return f"""你是本次编码任务的管理者、拆解者和报告验收者。
 
 **运行身份：** `{state.request_file}`
 **用户 prompt：** `{state.user_prompt_file}`
@@ -149,8 +134,8 @@ verdict.summary 用一两句话概括最终结论。"""
 
 ## 1. 拆解与选择
 
-读取用户 prompt，提取任务、步骤和验收标准。若用户明确指定 Claude Code 或 Codex，必须服从；
-否则根据任务特征和可用 worker 选择。一次运行只能选择一个 agent，所有返工沿用同一会话。
+读取用户 prompt，提取任务目标。若用户明确指定 Claude Code 或 Codex，必须服从；否则根据任务特征
+和可用 worker 选择。一次运行只能选择一个 agent，所有返工沿用同一会话。
 
 plan 写入 `{state.plan_file}`（先写 .tmp，解析确认后 rename）：
 
@@ -158,13 +143,12 @@ plan 写入 `{state.plan_file}`（先写 .tmp，解析确认后 rename）：
 {json.dumps(plan_example, ensure_ascii=False, indent=2)}
 ```
 
-用户要求的 agent 不可用时，仍写 plan，但不启动 worker；直接进入第 3 步写 rejected verdict，
-attempts=0，每个验收项标记失败并说明环境证据。
+用户要求的 agent 不可用时，仍写 plan，但不启动 worker；直接进入第 4 步写 rejected verdict。
 
 ## 2. 委派与监督
 
-根据 plan 选定的 agent 加载对应 skill。把任务摘要、步骤、上下文和预期结果写入首轮 task 文件，
-执行下方精确 run 命令。任务文件要求 worker 把结论、修改文件、检查结果和未完成事项精炼写入 result.md；
+根据 plan 选定的 agent 加载对应 skill。把用户 prompt 的全部目标、上下文和预期结果写入首轮 task 文件，
+执行下方精确 run 命令。任务文件要求 worker 在 result.md 中逐条说明 prompt 每个目标的完成情况（含修改文件、检查结果和未完成事项）；
 不要求复述过程或粘贴完整输出，长输出另存文件并在 result.md 中给出路径；返工轮只写本轮变化。worker 必须在 result.md 原子
 落盘后才写 receipt。
 
@@ -194,37 +178,34 @@ recover 与反复菜单共享全 run 最多 5 次恢复预算；首次普通菜�
 
 {command_sections}
 
-## 3. 独立验收与返工
+## 3. 报告验收与返工
 
-每轮 receipt 到达后，完整读取 result.md 和相关引用文件。然后你亲自读取工作区产物并运行命令，
-验证 plan 中每一个验收项。记录具体方法与证据，不能复制 worker 的自述。
+本项目的验收对象只有 worker 的 result.md 报告，不检查工作区、不运行命令、不复核产物。
+每轮 receipt 到达后，完整读取 result.md，只判断报告内容是否完成了用户 prompt 中的全部目标
+（含 prompt 写明的验收标准）。报告缺项、只做了一部分、声明失败或未完成，即判定不通过。
 
-若验收失败且还有轮次，把失败的验收项 ID、观察证据和修正要求写入下一轮 task 文件，执行对应
-send 命令。最多提交 {max_attempts} 轮。
+不通过且还有轮次时，把报告缺少的目标写入下一轮 task 文件，执行对应 send 命令。最多提交 {max_attempts} 轮。
+receipt 为 blocked 表示 worker 声明未完成，不能作为通过的一轮。
 
-receipt 为 blocked 表示 worker 声明未完成，该轮不能作为 accepted 的最终交接。可以处理且还有
-轮次时，写下一轮 task 要求处理；否则 stop 后写 rejected。
+## 4. 最终 verdict（必须完成）
 
-## 4. 最终 verdict
-
-无论成功、失败、环境不可用、阻塞或命令失败，都必须写 verdict。先写 `{state.verdict_file}.tmp`，
-执行下方校验命令，输出 "status": "valid" 后 rename 到 `{state.verdict_file}`：
+无论通过、失败、环境不可用或阻塞，结束前都必须写 verdict。先写 `{state.verdict_file}.tmp`，再执行：
 
 ```bash
 {validate_command}
 ```
 
-schema：
+校验命令输出 "status": "valid" 时已自动 rename 为正式 verdict，无需再操作；输出 invalid 时按 error 修正 .tmp 后重试。
 
 ```json
 {json.dumps(verdict_example, ensure_ascii=False, indent=2)}
 ```
 
-verdict 的 agent 必须与 plan 一致；checks 必须覆盖 plan 中全部验收项 ID。只有你独立验证所有
-check 均通过时才能写 accepted。rejected 必须包含非空 remaining_issues。artifacts 只能使用
-工作区内的相对路径，attempts 是实际提交给 worker 的轮数。accepted 时第 1 至第 attempts 轮都
-必须有有效 receipt，且第 attempts 轮 receipt 必须是 ready_for_verification。
+- status：accepted 或 rejected；accepted 要求最后一轮 result.md 完成全部目标且 receipt 为 ready_for_verification
+- summary：一两句话结论
+- remaining_issues：accepted 时为 []；rejected 时列出报告未完成的目标，不能为空
 
+run id、agent 与轮次由 SDK 从 plan 和回执推导，不要写入 verdict。
 rejected 前必须 stop。{session_policy}
 最后输出简短总结，但调用方只以 plan、receipt、DSH 协议完成事件和 verdict 文件为事实。
 """

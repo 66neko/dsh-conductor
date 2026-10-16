@@ -1,7 +1,7 @@
 # 取消、时间预算与资源清理
 
 本文描述 0.5.0 的生命周期契约。Python 3.13、标准库运行时、业务 prompt 和
-schema v2 verdict 保持不变。完整资源身份核验使用 Linux `/proc`，支持 Linux/WSL2。
+verdict 已改为 schema v3（只验收 result.md）。完整资源身份核验使用 Linux `/proc`，支持 Linux/WSL2。
 
 ## 同步调用与取消
 
@@ -124,7 +124,7 @@ CLI 仅在主线程临时处理 SIGINT/SIGTERM，handler 只记信号和设置 E
 
 - 原调用签名、ConductorError 捕获、str(exc)、run_id/state_directory 和旧 JSON 字段保留。
 - 新增 cleanup、错误分类、tmux_socket 和 attach_command；顶层 schema_version 仍是 1，
-  plan=1、verdict=2、receipt=1 不变。JSON 消费者应容忍新增字段。
+  plan=1、receipt=1 不变（verdict 现为 3）。JSON 消费者应容忍新增字段。
 - timeout_seconds 从 DSH 回合时限变为整个 run 总预算；需要时上调调用方预算。
 - 取消/超时后的 CLI 退出码更具体；原来只检查非零的脚本无需改变。
 - 清理失败可能使已经验收的任务抛 cleanup_failed，应检查 exc.result，避免无条件重试。

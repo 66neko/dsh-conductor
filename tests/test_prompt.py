@@ -38,7 +38,10 @@ class PromptTests(unittest.TestCase):
             self.assertIn("claude_session.py run", prompt)
             self.assertIn("codex_session.py run", prompt)
             self.assertIn(str(state.plan_file), prompt)
-            self.assertIn("checks 必须覆盖 plan 中全部验收项 ID", prompt)
+            self.assertIn("验收对象只有 worker 的 result.md 报告", prompt)
+            self.assertIn("已自动 rename 为正式 verdict", prompt)
+            self.assertNotIn("checks", prompt)
+            self.assertNotIn("acceptance_criteria", prompt)
             self.assertIn("一次运行只能选择一个 agent", prompt)
             self.assertNotIn("include_report=true", prompt)
             full = build_prompt(state, skill_scripts={kind: Path("/skill/controller.py") for kind in AgentKind},
@@ -46,7 +49,6 @@ class PromptTests(unittest.TestCase):
                                 keep_session=False, include_report=True)
             self.assertIn("include_report=true", full)
             self.assertIn("result.md", full)
-            self.assertIn("verdict.checks 完整记录每项检查", full)
             self.assertIn("verdict.summary 用一两句话", full)
 
 

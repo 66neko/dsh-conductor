@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import stat
 from dataclasses import dataclass
 from enum import StrEnum
@@ -118,31 +117,14 @@ def read_worker_result(receipt_file: Path, *, budget: Budget | None = None) -> s
 
 
 @dataclass(frozen=True, slots=True)
-class AcceptanceCriterion:
-    id: str
-    description: str
-
-    @classmethod
-    def from_json(cls, value: object) -> "AcceptanceCriterion":
-        record = _object(value, "acceptance criterion")
-        criterion_id = _string(record, "id")
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", criterion_id):
-            raise RecordError("criterion id has an unsupported format")
-        return cls(id=criterion_id, description=_string(record, "description"))
-
-    def to_json(self) -> JsonObject:
-        return {"id": self.id, "description": self.description}
-
-
-@dataclass(frozen=True, slots=True)
 class ExecutionPlan:
+    """DSH 的 agent 选择与任务摘要；验收目标直接取自用户 prompt。"""
+
     schema_version: int
     run_id: str
     agent: AgentKind
     agent_reason: str
     task_summary: str
-    implementation_steps: tuple[str, ...]
-    acceptance_criteria: tuple[AcceptanceCriterion, ...]
 
     @classmethod
     def load(cls, path: Path, *, expected_run_id: str, budget: Budget | None = None) -> "ExecutionPlan":
@@ -157,21 +139,12 @@ class ExecutionPlan:
             agent = AgentKind(_string(record, "agent"))
         except ValueError as exc:
             raise RecordError("plan.agent is not supported") from exc
-        raw_criteria = record.get("acceptance_criteria")
-        if not isinstance(raw_criteria, list) or not raw_criteria:
-            raise RecordError("acceptance_criteria must be a non-empty list")
-        criteria = tuple(AcceptanceCriterion.from_json(item) for item in raw_criteria)
-        ids = [criterion.id for criterion in criteria]
-        if len(ids) != len(set(ids)):
-            raise RecordError("acceptance criterion ids must be unique")
         return cls(
             schema_version=version,
             run_id=run_id,
             agent=agent,
             agent_reason=_string(record, "agent_reason"),
             task_summary=_string(record, "task_summary"),
-            implementation_steps=_string_list(record, "implementation_steps", non_empty=True),
-            acceptance_criteria=criteria,
         )
 
     def to_json(self) -> JsonObject:
@@ -181,52 +154,34 @@ class ExecutionPlan:
             "agent": self.agent.value,
             "agent_reason": self.agent_reason,
             "task_summary": self.task_summary,
-            "implementation_steps": list(self.implementation_steps),
-            "acceptance_criteria": [item.to_json() for item in self.acceptance_criteria],
         }
 
 
-@dataclass(frozen=True, slots=True)
-class VerificationCheck:
-    criterion_id: str
-    criterion: str
-    method: str
-    evidence: str
-    passed: bool
+def registered_attempts(supervision_file: Path, *, run_id: str, agent: AgentKind, session: str,
+                        budget: Budget | None = None) -> int:
+    """读取监督记录登记的轮次；记录缺失或身份不符时视为未登记。"""
+    try:
+        record = read_json_object(supervision_file, budget=budget)
+    except RecordError:
+        return 0
+    if (record.get("run_id"), record.get("agent"), record.get("session")) != (run_id, agent.value, session):
+        return 0
+    number = record.get("attempt")
+    return number if type(number) is int and number > 0 else 0
 
-    @classmethod
-    def from_json(cls, value: object) -> "VerificationCheck":
-        record = _object(value, "check")
-        passed = record.get("passed")
-        if not isinstance(passed, bool):
-            raise RecordError("check.passed must be a boolean")
-        return cls(
-            criterion_id=_string(record, "criterion_id"),
-            criterion=_string(record, "criterion"),
-            method=_string(record, "method"),
-            evidence=_string(record, "evidence"),
-            passed=passed,
-        )
 
-    def to_json(self) -> JsonObject:
-        return {
-            "criterion_id": self.criterion_id,
-            "criterion": self.criterion,
-            "method": self.method,
-            "evidence": self.evidence,
-            "passed": self.passed,
-        }
+VERDICT_SCHEMA_VERSION = 3
 
 
 @dataclass(frozen=True, slots=True)
 class Verdict:
+    """DSH 只给出结论；run、agent 与轮次由 SDK 从 plan 和落盘回执推导。"""
+
     schema_version: int
     run_id: str
     status: str
     agent: AgentKind
     attempts: int
-    artifacts: tuple[str, ...]
-    checks: tuple[VerificationCheck, ...]
     summary: str
     remaining_issues: tuple[str, ...]
 
@@ -236,90 +191,46 @@ class Verdict:
         path: Path,
         *,
         plan: ExecutionPlan,
-        max_attempts: int,
-        workspace: Path,
         expected_receipts: Sequence[tuple[Path, str]],
+        registered_attempts: int = 0,
         budget: Budget | None = None,
     ) -> "Verdict":
         record = read_json_object(path, budget=budget)
         version = _integer(record, "schema_version", minimum=1)
-        if version != 2:
-            raise RecordError(f"unsupported verdict schema_version: {version}")
-        run_id = _string(record, "run_id")
-        if run_id != plan.run_id:
-            raise RecordError(f"verdict run_id {run_id!r} does not match the plan")
-        try:
-            agent = AgentKind(_string(record, "agent"))
-        except ValueError as exc:
-            raise RecordError("verdict.agent is not supported") from exc
-        if agent is not plan.agent:
-            raise RecordError(f"verdict agent {agent.value!r} does not match the plan")
+        if version != VERDICT_SCHEMA_VERSION:
+            raise RecordError(f"unsupported verdict schema_version: {version}; expected {VERDICT_SCHEMA_VERSION}")
         status = _string(record, "status")
         if status not in {"accepted", "rejected"}:
             raise RecordError("verdict.status must be accepted or rejected")
-        attempts = _integer(record, "attempts", minimum=0)
-        if attempts > max_attempts:
-            raise RecordError("verdict.attempts exceeds max_attempts")
-        if status == "accepted" and attempts == 0:
-            raise RecordError("accepted verdict requires at least one worker attempt")
-
-        raw_artifacts = record.get("artifacts")
-        if not isinstance(raw_artifacts, list) or not all(isinstance(item, str) for item in raw_artifacts):
-            raise RecordError("verdict.artifacts must be a list of strings")
-        artifacts: list[str] = []
-        root = workspace.resolve()
-        for item in raw_artifacts:
-            if budget is not None:
-                budget.check()
-            relative = Path(item)
-            if relative.is_absolute() or relative == Path("."):
-                raise RecordError(f"artifact must be a relative path: {item!r}")
-            resolved = (root / relative).resolve(strict=False)
-            if not resolved.is_relative_to(root):
-                raise RecordError(f"artifact escapes workspace: {item!r}")
-            if status == "accepted" and not resolved.exists():
-                raise RecordError(f"accepted artifact does not exist: {item!r}")
-            artifacts.append(item)
-
-        raw_checks = record.get("checks")
-        if not isinstance(raw_checks, list):
-            raise RecordError("verdict.checks must be a list")
-        checks = tuple(VerificationCheck.from_json(item) for item in raw_checks)
-        planned_ids = {criterion.id for criterion in plan.acceptance_criteria}
-        check_ids = [check.criterion_id for check in checks]
-        if len(check_ids) != len(set(check_ids)):
-            raise RecordError("verdict criterion ids must be unique")
-        if set(check_ids) != planned_ids:
-            raise RecordError("verdict checks must cover every planned acceptance criterion exactly once")
-        if status == "accepted" and not all(check.passed for check in checks):
-            raise RecordError("accepted verdict requires all checks to pass")
-
+        summary = _string(record, "summary")
         issues = _string_list(record, "remaining_issues")
         if status == "accepted" and issues:
             raise RecordError("accepted verdict cannot contain remaining issues")
         if status == "rejected" and not issues:
             raise RecordError("rejected verdict requires at least one remaining issue")
 
+        # 轮次取监督登记轮次与最后一个已落盘回执的较大者，不依赖 DSH 自报。
+        attempts = min(max(registered_attempts, 0), len(expected_receipts))
+        for number, (receipt_path, _token) in enumerate(expected_receipts, start=1):
+            if budget is not None:
+                budget.check()
+            if receipt_path.exists():
+                attempts = max(attempts, number)
         if status == "accepted":
-            # accepted 必须能追溯到所选 agent 的每一次真实交接。
-            if len(expected_receipts) < attempts:
-                raise RecordError("accepted verdict has no receipt definition for every attempt")
-            receipts = [
-                WorkerReceipt.load(receipt_path, expected_token=token, budget=budget)
-                for receipt_path, token in expected_receipts[:attempts]
-            ]
-            if receipts[-1].status != "ready_for_verification":
+            if attempts == 0:
+                raise RecordError("accepted verdict requires a worker receipt")
+            receipt_path, token = expected_receipts[attempts - 1]
+            receipt = WorkerReceipt.load(receipt_path, expected_token=token, budget=budget)
+            if receipt.status != "ready_for_verification":
                 raise RecordError("accepted verdict requires a ready_for_verification final receipt")
 
         return cls(
             schema_version=version,
-            run_id=run_id,
+            run_id=plan.run_id,
             status=status,
-            agent=agent,
+            agent=plan.agent,
             attempts=attempts,
-            artifacts=tuple(artifacts),
-            checks=checks,
-            summary=_string(record, "summary"),
+            summary=summary,
             remaining_issues=issues,
         )
 
@@ -330,8 +241,6 @@ class Verdict:
             "status": self.status,
             "agent": self.agent.value,
             "attempts": self.attempts,
-            "artifacts": list(self.artifacts),
-            "checks": [check.to_json() for check in self.checks],
             "summary": self.summary,
             "remaining_issues": list(self.remaining_issues),
         }

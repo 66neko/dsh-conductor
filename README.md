@@ -84,8 +84,8 @@ Codex”；没有明确指定时，DSH 根据任务与当前环境选择。调�
 `conductor`。事件只用于显示进度，完成事实仍由 DSH 协议、worker receipt 和最终 verdict
 文件决定。`TaskResult` 包含：
 
-- `plan`：DSH 生成的 agent、任务摘要、步骤和带 ID 的验收项；
-- `verdict`：DSH 独立检查后的 `accepted`/`rejected`、每项证据、产物和剩余问题；
+- `plan`：DSH 选择的 agent、理由和任务摘要；
+- `verdict`：DSH 只依据 result.md 判断是否完成 prompt 目标后的 `accepted`/`rejected`、summary 和剩余问题；
 - `state_directory`：本轮 request、plan、task、receipt、verdict 与 `worker-screen.log`；
 - `dsh`：协议状态、耗时、事件数量和 DSH 最后文本；
 - `cleanup`：资源清理状态、未回收资源和诊断；
@@ -110,14 +110,15 @@ SDK 和 CLI 默认关闭完整报告，CLI 加 `--include-report` 开启。quick
 
 ### 3. 处理结果并读取 JSON
 
+> 从 0.6.x 升级：0.7.0 起验收只分析 `result.md`，并删除了 plan/verdict 的部分字段，见[升级指南](docs/upgrade-0.7.md)。
+
 业务代码通常先检查 `result.accepted`，再读取结构化计划和验收结论：
 
 ```python
 payload = result.to_json()
 
 if payload["status"] == "accepted":
-    for artifact in payload["verdict"]["artifacts"]:
-        print("已验收产物：", artifact)
+    print("已验收：", payload["verdict"]["summary"])
 else:
     print("未通过：", payload["verdict"]["remaining_issues"])
 ```
@@ -192,7 +193,7 @@ raise SystemExit(0 if result.accepted else 1)
 可运行示例见 [`examples/quickstart.py`](examples/quickstart.py)。
 
 仓库中的 quickstart 让 worker 创建 `hello.py`，运行后输出 `Hello, DSH!` 和一个换行，
-并交付简短的 `result.md`。DSH 独立执行脚本验收，调用方再检查退出码、stdout 与 stderr。
+并交付简短的 `result.md`。DSH 依据 result.md 做报告验收，调用方再检查退出码、stdout 与 stderr。
 默认流程直接运行这个轻量任务，便于快速验证 SDK、worker 交接和报告返回。
 
 在仓库根目录运行（直接执行脚本会使用当前仓库源码）：
@@ -265,7 +266,7 @@ Codex 使用 bracketed paste，先读屏确认草稿，再发送 Enter；草稿�
 `running`。多行草稿或折叠粘贴仍停在输入框时，会提前返回 `submission_pending`，由 DSH 补发
 一次 Enter 并重新观察；每次补发计入全 run 最多 5 次恢复预算。30 秒仍不能确认提交则返回
 `submission_unconfirmed`，要求 DSH 检查是否尚未启动。提交确认不受 SDK 心跳影响，也不等待
-300 秒静默超时。任务成功仍以有效 receipt、完整结果文件和独立验收为准。
+300 秒静默超时。任务成功仍以有效 receipt、完整结果文件和报告验收为准。
 
 | 配置 | 默认值 | 含义 |
 |---|---:|---|
@@ -297,7 +298,7 @@ CLI 使用 `--no-sdk-heartbeat-counts-as-activity`。关闭屏幕日志或回调
 Claude Code 和 Codex 每轮都必须将完整回答、关键结论、修改记录、检查结果及阻塞信息写入
 `result.md`，长检查输出另存文件并在结果中引用。结果最终原子落盘后才能写入绑定 token 的
 receipt；控制器和 SDK 都会拒绝缺失、空白或非 UTF-8 的结果文件。DSH 收到回执后读取完整结果
-及相关引用文件，再独立检查工作区。`TaskResult.worker_result`（JSON 中同名字段）提供最后
+，只判断报告是否完成 prompt 目标，不复核工作区。`TaskResult.worker_result`（JSON 中同名字段）提供最后
 一轮已有结果文件的路径；它是 worker 的报告，不替代 verdict。
 
 conductor 会同时轮询两个候选 tmux 会话；DSH 选择哪个 agent 后，只有实际存在的会话产生屏幕日志。
