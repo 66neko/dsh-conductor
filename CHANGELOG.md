@@ -4,48 +4,67 @@ All notable changes to this project will be documented in this file.
 
 ## [0.7.0] - 2026-10-16
 
-### ⚠️ Breaking changes
+本版重构验收流程：DSH 不再检查工作区、不再运行命令，**只读取 worker 的 `result.md`，判断报告是否完成
+用户 prompt 的全部目标**。plan 与 verdict 随之精简，DSH 在验收阶段只需写三个字段，缩短验收耗时并消除
+“verdict 未落盘导致没有验收报告”的主要成因。本版包含破坏性变更，升级前请阅读完整
+[升级指南](https://github.com/66neko/dsh-conductor/blob/v0.7.0/docs/upgrade-0.7.md)。
 
-This release changes acceptance semantics and removes fields from `plan` and `verdict`.
-Read the full upgrade guide before upgrading: [docs/upgrade-0.7.md](https://github.com/66neko/dsh-conductor/blob/v0.7.0/docs/upgrade-0.7.md).
+### ⚠️ 破坏性变更
 
-- **Acceptance semantics.** DSH no longer inspects the workspace or runs commands. It only reads the worker's `result.md` and decides whether the report covers every goal in the caller prompt. `accepted` now means "the final `result.md` reports all prompt goals as done", not "DSH independently verified the workspace". Callers that deploy, publish or merge on `accepted` must check artifacts themselves.
-- **`plan` fields removed:** `implementation_steps`, `acceptance_criteria`. Remaining: `schema_version` (still 1), `run_id`, `agent`, `agent_reason`, `task_summary`. Extra fields in old plan files are ignored.
-- **`verdict` schema 2 → 3; fields removed:** `checks`, `artifacts`. Remaining: `schema_version`, `run_id`, `status`, `agent`, `attempts`, `summary`, `remaining_issues`. v2 verdict files are rejected.
-- **SDK no longer checks** that verdict artifacts exist, that every acceptance criterion is covered, or that all checks passed.
-- **Internal API (`conductor.models`):** `AcceptanceCriterion` and `VerificationCheck` removed; `ExecutionPlan(...)` and `Verdict(...)` constructor arguments changed; `Verdict.load()` drops `max_attempts` and `workspace` and gains optional `registered_attempts`.
-- **`conductor validate-verdict`** now renames a valid `--verdict` temporary file to the final `verdict.json`, and its output adds `verdict_file`.
+- **验收语义改变。** `accepted` 由“DSH 已独立验证工作区全部验收项”变为“DSH 判定最后一轮 `result.md`
+  报告完成了 prompt 全部目标”。worker 在报告中误报完成时仍可能 accepted；依赖 accepted 自动部署、
+  发布或合并的调用方，需要自行检查产物。
+- **plan 删除字段：** `implementation_steps`、`acceptance_criteria`。保留 `schema_version`（仍为 1）、
+  `run_id`、`agent`、`agent_reason`、`task_summary`。旧 plan 文件中的多余字段会被忽略。
+- **verdict schema 由 2 升为 3，删除字段：** `checks`、`artifacts`。保留 `schema_version`、`run_id`、
+  `status`、`agent`、`attempts`、`summary`、`remaining_issues`。v2 verdict 文件会被拒绝。
+- **SDK 不再校验** verdict 产物路径是否存在、验收项是否全覆盖、各检查项是否全部通过。
+- **内部 API（`conductor.models`）：** 删除 `AcceptanceCriterion`、`VerificationCheck`；`ExecutionPlan(...)`
+  与 `Verdict(...)` 构造参数改变；`Verdict.load()` 删除 `max_attempts`、`workspace` 参数，新增可选
+  `registered_attempts`。
+- **`conductor validate-verdict`** 校验通过后会把 `--verdict` 指定的临时文件 rename 为正式
+  `verdict.json`，输出新增 `verdict_file` 字段。
 
-### Changed
+### 改进
 
-- DSH writes only `status`, `summary` and `remaining_issues`. The SDK fills `run_id` and `agent` from the plan, and derives `attempts` from `supervision.json` and on-disk receipts (the larger of the two).
-- `accepted` still requires a valid token-bound receipt for the final attempt, a non-empty UTF-8 `result.md`, and `ready_for_verification` receipt status; `rejected` still requires at least one remaining issue.
-- The final rename to `verdict.json` is done by `validate-verdict`, so a run no longer fails because DSH validated the verdict but forgot to rename it.
-- DSH manager contract (`conductor/prompt.py`) is shorter: section 3 is report-only acceptance, section 4 marks the verdict as mandatory with a three-field schema. Task files ask workers to state how each prompt goal was completed in `result.md`.
-- Both skill `SKILL.md` files, README, AGENTS.md and `docs/` (architecture, lifecycle, result-json, full-report) updated for the new flow.
+- DSH 只写 `status`、`summary`、`remaining_issues`；`run_id`、`agent` 由 SDK 从 plan 填入，`attempts`
+  取 `supervision.json` 登记轮次与最后一个已落盘 receipt 轮次中的较大者，不再依赖 DSH 自报。
+- accepted 仍要求最后一轮 token 回执有效、`result.md` 为非空 UTF-8，且回执状态为
+  `ready_for_verification`；rejected 仍要求至少一项 `remaining_issues`。
+- 正式 verdict 的 rename 由 `validate-verdict` 完成，不会再出现“校验通过但忘记 rename”导致运行失败。
+- DSH 管理契约（`conductor/prompt.py`）精简：第 3 节改为仅报告验收，第 4 节明确 verdict 为必须完成项并
+  只要求三字段；任务文件要求 worker 在 `result.md` 中逐条说明 prompt 每个目标的完成情况。
+- 两个 skill 的 `SKILL.md`、README、AGENTS.md 以及 `docs/`（architecture、lifecycle、result-json、
+  full-report）同步更新。
 
-### Added
+### 新增
 
-- `docs/upgrade-0.7.md`: complete upgrade guide with grep checklist, before/after code, unchanged surface and rollback steps.
-- `conductor.models.registered_attempts()` and `conductor.models.VERDICT_SCHEMA_VERSION`.
-- CLI test covering `validate-verdict` rename only on a valid verdict.
+- `docs/upgrade-0.7.md`：完整升级指南，含 grep 自查命令、迁移前后代码对照、不变部分清单与回退方法。
+- `conductor.models.registered_attempts()` 与 `conductor.models.VERDICT_SCHEMA_VERSION`。
+- CLI 测试：覆盖 `validate-verdict` 仅在 verdict 有效时才 rename。
 
-### Unchanged
+### 保持不变
 
-- `Conductor`, `ConductorConfig` (all fields and defaults), `run(prompt, on_event, *, cancel_event)`, `TaskResult` and top-level JSON (`schema_version` 1, `status`, `accepted`), `ConductorError` codes/phases, `RunEvent`, CLI `run` arguments, stdout JSON and exit codes, receipt schema 1, `include_report` format, tmux isolation, recovery budget, cleanup and cancellation.
+`Conductor`、`ConductorConfig`（全部字段与默认值）、`run(prompt, on_event, *, cancel_event)`、`TaskResult`
+及顶层 JSON（`schema_version` 1、`status`、`accepted`）、`ConductorError` 的 code/phase、`RunEvent`、
+CLI `run` 参数、stdout 单一 JSON 与退出码、receipt schema 1、`include_report` 报告格式、tmux 隔离、
+恢复预算、清理与取消语义。
 
-### Upgrade recommendations
+### 升级建议
 
-1. Make sure no run is in progress; finished run directories stay usable with `cleanup_run`.
-2. Search caller code for `acceptance_criteria`, `implementation_steps`, `checks`, `artifacts`, `criterion`, `schema_version`, `Verdict.load`, `ExecutionPlan.load` and migrate hits as shown in the guide.
-3. Add your own artifact checks wherever `accepted` triggers automated deployment or publishing.
-4. Ask workers in your prompt to list every goal and its completion status in `result.md`.
-5. Upgrade with `pip install --upgrade "dsh-conductor==0.7.0"`, run `python3.13 -m conductor doctor`, then a small task. Roll back with `pip install "dsh-conductor<0.7"`.
+1. 确认没有正在执行的 run；已结束的历史运行目录不受影响，`cleanup_run` 仍可使用。
+2. 在调用方代码中搜索 `acceptance_criteria`、`implementation_steps`、`checks`、`artifacts`、`criterion`、
+   `schema_version`、`Verdict.load`、`ExecutionPlan.load`，按升级指南迁移命中的代码。
+3. 对以 accepted 触发自动部署或发布的流程，补充调用方自己的产物检查。
+4. 在 prompt 中要求 worker 在 `result.md` 中逐条列出每个目标及其完成情况，验收会更稳定。
+5. 执行 `pip install --upgrade "dsh-conductor==0.7.0"`，再运行 `python3.13 -m conductor doctor` 和一个
+   小任务验证；需要回退时执行 `pip install "dsh-conductor<0.7"`。
 
-### Validation
+### 验证
 
-- All 148 unit tests pass; `compileall` clean.
-- Live DSH 0.1.6-alpha.2 + Claude Code run: 1 attempt, accepted in 75 s, verdict validated and renamed on the first try; DSH used about 5 s from receipt to final verdict.
+- 148 个单元测试全部通过，`compileall` 无错误。
+- 真实 DSH 0.1.6-alpha.2 + Claude Code 运行：1 轮完成，75 秒 accepted，verdict 首次校验即通过并自动
+  rename；DSH 从收到回执到写完 verdict 约 5 秒。
 
 ---
 
