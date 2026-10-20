@@ -34,7 +34,7 @@
 4. CLI stdout 只有一个 JSON 对象；实时进度由 `RunEvent` 回调交给调用方，CLI 再写 stderr。
 5. DSH 是否完成只认 `turn/end.reason.kind` 与 `session.status == idle`。
 6. worker 成功交接只认绑定 token 的 receipt 和非空 UTF-8 result.md；屏幕可用于诊断、选择、恢复和失败判断，不能作为成功依据；失败无需回执。
-7. 验收只分析 result.md 是否完成 prompt 目标，不复核工作区。verdict 为 schema v3，DSH 只写 status/summary/remaining_issues；run id、agent、轮次由 SDK 从 plan、监督记录和 receipt 推导，accepted 要求最后一轮 receipt 有效且为 ready_for_verification。`validate-verdict` 校验通过后自动 rename。
+7. 验收只分析 result.md 是否完成 prompt 目标，不复核工作区。verdict 为 schema v3，DSH 只写 status/summary/remaining_issues；run id、agent、轮次由 SDK 从 plan、监督记录和 receipt 推导，accepted 要求最后一轮 receipt 有效且为 ready_for_verification。`validate-verdict` 校验通过后自动 rename。DSH prompt 指导其在委派阶段也要求 worker 在 result.md 中逐条说明完成情况。
 8. `DSH_PERMISSION_MODE` 必须是 `danger-full-access`，由 DSH 客户端强制设置。
 9. 两个 skill 只有仓库中的源码；运行前直接覆盖到 `<workspace>/.dsh/skills`，不写入全局目录；修改 skill 时同步中文 `SKILL.md`。
 10. tmux 文本通过 buffer/paste 传递，不能把自然语言直接拼入 shell 命令。
@@ -45,6 +45,7 @@
 15. 每个 SDK run 使用私有 tmux socket 和资源启动身份，不能对默认 server 或裸 PID 执行恢复清理。只有 accepted + keep_session 可保留 worker；清理状态必须可核验。
 16. 同一 workspace 拒绝重叠 run。SDK 不改宿主信号处理器；CLI 在主线程临时处理 SIGINT/SIGTERM，清理后输出一个 JSON 并恢复处理器。
 17. include_report 默认关闭；开启时 report 合并实际各轮和已登记子任务报告正文及可信 verdict，不改写 worker_result、dsh.final_text 或验收语义。缺失正文必须明示，报告组装共用剩余预算，不能覆盖首次执行错误。
+18. DSH 首轮委派时 task.md 直接使用用户 prompt 中的任务部分（从 user_prompt_file 提取，去掉验收标准），不加工、不改写；返工轮在用户原始任务后追加本轮修正要求。worker 交接指令（`_submission_prompt`）只包含最小必要协议约束（工作区、结果文件、回执命令），不规定 result.md 格式。
 
 ## 常用命令
 

@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.7.1] - 2026-10-20
+
+### 改进
+
+- **任务提示词透传。** DSH 首轮 task.md 现在直接使用用户 prompt 中的任务部分（去掉验收标准），不再改写或加工用户原始任务描述。返工轮在用户原始任务后追加本轮修正要求。
+- **简化 worker 交接指令。** `_submission_prompt()` 去掉了 DSH 的格式要求（"精炼报告"、"按以下结构"），只保留最小必要的协议约束（工作区、结果文件、回执命令）。
+- **更新测试。** 更新 `tests/test_agents.py` 中的断言，适配新的简化交接指令。
+- **新增不变量 18。** 在 `AGENTS.md` 中明确记录：首轮 task.md 直接使用用户任务，返工轮追加修正要求。
+
+### 技术细节
+
+修改模块：
+- `conductor/agents/base.py` - 简化 `_submission_prompt()` 方法
+- `conductor/prompt.py` - 指导 DSH 首轮直接使用用户任务
+- `tests/test_agents.py` - 更新测试断言
+- `AGENTS.md` - 新增不变量 18
+
 ## [0.7.0] - 2026-10-16
 
 本版重构验收流程：DSH 不再检查工作区、不再运行命令，**只读取 worker 的 `result.md`，判断报告是否完成
