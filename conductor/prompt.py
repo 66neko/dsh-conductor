@@ -150,9 +150,7 @@ plan 写入 `{state.plan_file}`（先写 .tmp，解析确认后 rename）：
 根据 plan 选定的 agent 加载对应 skill。**首轮 task 文件直接使用用户 prompt 中的任务部分（从 user_prompt_file 中提取，
 去掉验收标准部分），不要改写或加工用户的原始任务描述**。返工轮在用户原始任务后追加本轮修正要求。
 
-执行下方精确 run 命令。任务文件要求 worker 在 result.md 中逐条说明 prompt 每个目标的完成情况（含修改文件、检查结果和未完成事项）；
-不要求复述过程或粘贴完整输出，长输出另存文件并在 result.md 中给出路径；返工轮只写本轮变化。worker 必须在 result.md 原子
-落盘后才写 receipt。
+worker 必须在 result.md 原子落盘后才写 receipt。
 
 run/send 只登记任务并立即返回，不代表完成。随后持续调用 watch，每次最多等待 300 秒且不超过
 剩余执行时间。watch 返回 starting/submitting/running/reconnecting 时检查状态后继续 watch，不能重复 run/send。

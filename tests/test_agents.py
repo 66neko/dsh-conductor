@@ -106,10 +106,12 @@ class AgentControllerTests(unittest.TestCase):
         self.assertIn("/tmp/task.md", prompt)
         self.assertIn("/tmp/result.md", prompt)
         self.assertIn(" complete ", prompt)
-        # 提示词引用任务文件和结果文件，但不规定具体格式
+        # 提示词引用任务文件和结果文件，规定报告格式约束（协议层）
         self.assertIn("任务文件", prompt)
         self.assertIn("结果文件", prompt)
         self.assertIn("按任务要求组织", prompt)
+        self.assertIn("100 行内", prompt)
+        self.assertIn("返工轮只写本轮变化", prompt)
         self.assertNotIn("完整回答", prompt)
         self.assertNotIn("subtask-reports.json", prompt)
         # include_report 参数已废弃，不再生成子任务报告

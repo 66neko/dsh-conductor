@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.7.2] - 2026-10-21
+
+### 改进
+
+- **协议层统一报告格式约束。** 将 result.md 的格式要求（100 行内、返工轮只写本轮变化）从 DSH 管理契约移到 worker 交接指令，确保 DSH 的 prompt.py 第 2 节只负责任务透传，不再对报告格式做任何要求。
+- **对齐三处文档。** 同步更新 `skills/tmux-claude-code/SKILL.md` 和 `skills/tmux-codex/SKILL.md` 中的报告格式要求，与交接指令保持一致。
+- **增强测试。** 更新 `tests/test_agents.py` 中的断言，验证交接指令包含 100 行限制和返工轮约束。
+
+### 技术细节
+
+修改模块：
+- `conductor/agents/base.py` - 在 `_submission_prompt()` 中加入报告格式约束
+- `conductor/prompt.py` - 去掉第 2 节对报告格式的要求，只保留 receipt 约束
+- `skills/tmux-claude-code/SKILL.md` - 更新报告格式说明
+- `skills/tmux-codex/SKILL.md` - 更新报告格式说明
+- `tests/test_agents.py` - 更新测试断言
+
 ## [0.7.1] - 2026-10-20
 
 ### 改进

@@ -98,7 +98,9 @@ def _submission_prompt(*, task_file: Path, script: Path, receipt: Path, token: s
 任务文件：`{task_file}`
 结果文件：`{result_file}`
 
-完成任务后，把工作结果写入结果文件（UTF-8 编码，内容按任务要求组织）。
+完成任务后，把工作结果写入结果文件（UTF-8 编码，内容按任务要求组织），尽量控制在 100 行内。
+返工轮只写本轮变化。
+
 然后运行以下命令提交回执，并把 summary 占位文字改为简短事实总结：
 
 {command}
